@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 def _norm(s: str) -> str:
     return str(s).strip().lower()
 
-# Pistas genéricas (funciona con planillas distintas)
+# Pistas genéricas (sirve para planillas distintas)
 ING_HINTS = ["monto", "neto", "total", "importe", "facturacion", "ingreso", "venta", "principal"]
 COST_HINTS = [
     "costo", "costos", "gasto", "gastos", "insumo", "insumos",
@@ -74,7 +74,7 @@ def analizar_datos_taller(data: Dict[str, pd.DataFrame], cliente_contiene: str =
     """
     KPIs genéricos multi-hoja (sin rango de fechas):
     - ingresos: suma de TODAS las columnas numéricas con hints de ingreso (en todas las hojas)
-    - costos: suma de TODAS las columnas numéricas con hints de costo (en todas las hojas)
+    - costos:   suma de TODAS las columnas numéricas con hints de costo (en todas las hojas)
     - margen, margen_pct
     - servicios: conteo (por patente/orden/folio/... o filas con ingreso>0)
     - ticket_promedio = ingresos / servicios
@@ -147,4 +147,5 @@ def analizar_datos_taller(data: Dict[str, pd.DataFrame], cliente_contiene: str =
         "lead_time_mediano_dias": lead_time,
         "hojas": hojas
     }
+
 
