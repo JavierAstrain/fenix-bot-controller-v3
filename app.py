@@ -691,7 +691,7 @@ elif st.session_state.menu_sel == "KPIs":
                 df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
                 df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
                 g = (df2.dropna(subset=[fec]).set_index(fec).groupby(pd.Grouper(freq="M"))["__v"].sum())
-                ser_total = g if ser_total es None else ser_total.add(g, fill_value=0)
+                ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
         if ser_total is not None and len(ser_total.dropna()) >= 2:
             with c3d:
                 st.caption("Tendencia Mensual de Ingresos (todas las hojas con fecha)")
@@ -776,4 +776,5 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
 
