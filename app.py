@@ -56,7 +56,8 @@ if "modo_respuesta" not in st.session_state:   st.session_state.modo_respuesta =
 # CARGA (CACHE)
 # ---------------------------
 @st.cache_data(show_spinner=False, ttl=300)
-def load_excel(file): return pd.read_excel(file, sheet_name=None)
+def load_excel(file): 
+    return pd.read_excel(file, sheet_name=None)
 
 @st.cache_data(show_spinner=False, ttl=300)
 def load_gsheet(json_keyfile: str, sheet_url: str):
@@ -109,16 +110,15 @@ def _fmt_pesos(x, pos=None):
     except Exception:
         return str(x)
 
-# ---------------------------
-# VISUALIZACIONES
-# ---------------------------
 def _export_fig(fig):
-    import io
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
     buf.seek(0)
     return buf.read()
 
+# ---------------------------
+# VISUALIZACIONES
+# ---------------------------
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
@@ -182,7 +182,8 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
             if med > 0 and top_val / med >= 3.0:
                 st.info("Distribución desbalanceada: muestro tabla para mejor lectura.")
                 mostrar_tabla(df, col_categoria, col_valor, titulo); return
-    except Exception: pass
+    except Exception: 
+        pass
     if top_n is None: top_n = st.session_state.get("top_n_grafico", 12)
     recorte = False
     if len(resumen) > top_n:
@@ -213,7 +214,6 @@ def parse_and_render_instructions(respuesta_texto: str, data_dict: dict, cliente
 
     def apply_client(df):
         if not cliente_txt: return df
-        # localizar columna cliente si existe
         cliente_col = next((c for c in df.columns if "cliente" in _norm(c)), None)
         if not cliente_col: return df
         out = df.copy()
@@ -267,7 +267,7 @@ def parse_and_render_instructions(respuesta_texto: str, data_dict: dict, cliente
                 if not ok: st.warning("No se pudo generar la tabla (verifica columnas).")
 
 # ---------------------------
-# PLANIFICACIÓN LLM (igual que antes)
+# PLANNER
 # ---------------------------
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -363,6 +363,103 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -
     return False
 
 # ---------------------------
+# DASHBOARD KPIs (nuevo)
+# ---------------------------
+def _first_col_with(df: pd.DataFrame, keys):
+    for c in df.columns:
+        if any(k in _norm(str(c)) for k in keys):
+            return c
+    return None
+
+def _apply_client_filter_df(df: pd.DataFrame, client_txt: str) -> pd.DataFrame:
+    if not client_txt:
+        return df
+    cli = _first_col_with(df, ["cliente"])
+    if not cli:
+        return df
+    out = df.copy()
+    return out[out[cli].astype(str).str.contains(client_txt, case=False, na=False)]
+
+def _ing_col(df: pd.DataFrame):
+    for k in ["monto", "neto", "total", "importe", "facturacion", "ingreso", "venta", "principal"]:
+        c = _first_col_with(df, [k])
+        if c is not None:
+            return c
+    return None
+
+def _date_col(df: pd.DataFrame):
+    return _first_col_with(df, ["fecha", "mes", "emision", "emisión"])
+
+def _count_col(df: pd.DataFrame):
+    return _first_col_with(df, ["estado", "resultado", "situacion", "situación", "status"])
+
+def render_kpi_dashboard(data: dict, cliente_txt: str):
+    st.markdown("#### 📊 Dashboard")
+    c1, c2, c3 = st.columns(3)
+
+    # 1) Top-10 Clientes
+    plotted1 = False
+    for hoja, df in data.items():
+        cli = _first_col_with(df, ["cliente"])
+        val = _ing_col(df)
+        if cli and val:
+            df2 = _apply_client_filter_df(df, cliente_txt).copy()
+            vals = pd.to_numeric(df2[val], errors="coerce")
+            top = (df2.assign(__v=vals).groupby(cli, dropna=False)["__v"]
+                     .sum().sort_values(ascending=False).head(10))
+            with c1:
+                st.caption(f"Top‑10 Clientes ({hoja})")
+                _barras_horizontal(top, cli, val, titulo=None)
+            plotted1 = True
+            break
+    if not plotted1:
+        with c1: st.info("No se encontró columna de cliente para Top‑10.")
+
+    # 2) Distribución por Estado
+    plotted2 = False
+    for hoja, df in data.items():
+        est = _count_col(df)
+        if est:
+            df2 = _apply_client_filter_df(df, cliente_txt)
+            dist = df2[est].astype(str).str.strip().str.title().value_counts().head(8)
+            if len(dist) >= 1:
+                with c2:
+                    st.caption(f"Distribución por Estado ({hoja})")
+                    fig, ax = plt.subplots()
+                    ax.pie(dist.values, labels=dist.index.astype(str), autopct="%1.0f%%", startangle=90)
+                    ax.axis("equal")
+                    st.pyplot(fig)
+                    st.download_button("⬇️ PNG", _export_fig(fig), "kpi_estado.png", "image/png")
+                plotted2 = True
+                break
+    if not plotted2:
+        with c2: st.info("No se encontró columna de estado para distribución.")
+
+    # 3) Tendencia mensual de ingresos (suma multi-hoja)
+    ser_total = None
+    for hoja, df in data.items():
+        val = _ing_col(df); fec = _date_col(df)
+        if val and fec:
+            df2 = _apply_client_filter_df(df, cliente_txt).copy()
+            df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
+            df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
+            g = (df2.dropna(subset=[fec])
+                    .set_index(fec)
+                    .groupby(pd.Grouper(freq="M"))["__v"].sum())
+            ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
+    if ser_total is not None and len(ser_total.dropna()) >= 2:
+        with c3:
+            st.caption("Tendencia Mensual de Ingresos (todas las hojas con fecha)")
+            fig, ax = plt.subplots()
+            ax.plot(ser_total.index, ser_total.values, marker="o")
+            ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+            fig.autofmt_xdate()
+            st.pyplot(fig)
+            st.download_button("⬇️ PNG", _export_fig(fig), "kpi_tendencia.png", "image/png")
+    else:
+        with c3: st.info("No se detectaron fechas para tendencia mensual.")
+
+# ---------------------------
 # UI
 # ---------------------------
 col1, col2 = st.columns([1,3])
@@ -387,91 +484,5 @@ with col1:
 
     st.markdown("### ⚙️ Preferencias")
     st.session_state.modo_respuesta = st.radio("Modo de respuesta", ["Ejecutivo (breve)","Analítico (detallado)"])
-    st.session_state.max_cats_grafico = st.number_input("Máx. categorías para graficar", 6, 200, st.session_state.max_cats_grafico)
-    st.session_state.top_n_grafico = st.number_input("Top‑N por defecto (barras)", 5, 100, st.session_state.top_n_grafico)
+   
 
-data = st.session_state.data
-
-with col2:
-    if data:
-        # Filtro opcional por cliente (genérico)
-        st.markdown("### 🎛️ Filtros")
-        cliente_txt = st.text_input("Cliente contiene…", value="")
-
-        tabs = st.tabs(["📈 KPIs", "📄 Vista previa", "🤖 Consulta IA", "🧠 Historial"])
-
-        with tabs[0]:
-            kpis = analizar_datos_taller(data, cliente_txt)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
-            c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
-            c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
-            c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
-            c5, c6, c7 = st.columns(3)
-            c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
-            tp = kpis.get("ticket_promedio")
-            c6.metric("Ticket promedio", f"${int(round(tp)):,}".replace(",", ".") if tp else "—")
-            conv = kpis.get("conversion_pct")
-            c7.metric("Conversión",   f"{conv:.1f}%" if conv is not None else "—")
-            lt = kpis.get("lead_time_mediano_dias")
-            if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
-
-        with tabs[1]:
-            st.markdown("### 📄 Hojas")
-            for name, df in data.items():
-                dfv = df.copy()
-                if cliente_txt:
-                    cli_col = next((c for c in df.columns if "cliente" in _norm(c)), None)
-                    if cli_col:
-                        dfv = dfv[dfv[cli_col].astype(str).str.contains(cliente_txt, case=False, na=False)]
-                st.markdown(f"#### 📘 {name} • filas: {len(dfv)}")
-                st.dataframe(dfv.head(10))
-
-        with tabs[2]:
-            st.markdown("### 🤖 Consulta")
-            pregunta = st.text_area("Pregunta")
-            c1, c2 = st.columns(2)
-            if c1.button("📊 Análisis General Automático"):
-                analisis = analizar_datos_taller(data, cliente_txt)
-                prompt = f"""
-Eres un controller financiero senior.
-Con base en los datos calculados (reales) a continuación, entrega un análisis profesional y accionable.
-Incluye UNA instrucción si ayuda:
-- grafico_torta:cat|val|titulo
-- grafico_barras:cat|val|titulo
-- tabla:cat|val
-No inventes datos.
-
-Datos calculados:
-{json.dumps(analisis, ensure_ascii=False, indent=2)}
-"""
-                r = ask_gpt(prompt); st.markdown(r)
-                st.session_state.historial.append({"pregunta":"Análisis general","respuesta":r})
-                parse_and_render_instructions(r, data, cliente_txt)
-
-            if c2.button("Responder") and pregunta:
-                schema = _build_schema(data)
-                plan = plan_from_llm(pregunta, schema)
-                executed = False
-                if plan: executed = execute_plan(plan, data, cliente_txt)
-                if not executed:
-                    prompt = f"""
-Responde como controller financiero. Si puedes, incluye UNA instrucción:
-- grafico_torta:cat|val|titulo
-- grafico_barras:cat|val|titulo
-- tabla:cat|val[|titulo]
-Para categorías tipo ID (patente/folio/doc/factura/oc), prefiere tabla.
-Pregunta: {pregunta}
-Esquema: {json.dumps(schema, ensure_ascii=False)}
-"""
-                    r = ask_gpt(prompt); st.markdown(r)
-                    st.session_state.historial.append({"pregunta":pregunta,"respuesta":r})
-                    parse_and_render_instructions(r, data, cliente_txt)
-
-        with tabs[3]:
-            if st.session_state.historial:
-                for i, h in enumerate(st.session_state.historial[-12:], 1):
-                    st.markdown(f"**Q{i}:** {h['pregunta']}")
-                    st.markdown(f"**A{i}:** {h['respuesta']}")
-            else:
-                st.info("Aún no hay historial en esta sesión.")
