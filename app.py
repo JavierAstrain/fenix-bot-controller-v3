@@ -86,8 +86,79 @@ def ask_gpt(messages) -> str:
         st.error(f"Fallo en la petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
+# --- Diagnóstico detallado de OpenAI (para la sección Diagnóstico IA) ---
+def diagnosticar_openai():
+    """Devuelve un dict con el estado de la API, prueba de chat y señales de cuota."""
+    res = {
+        "api_key_present": False,
+        "organization_set": False,
+        "base_url_set": False,
+        "list_models_ok": False,
+        "chat_ok": False,
+        "quota_ok": None,           # True/False/None
+        "usage_tokens": None,
+        "error": None
+    }
+    # 1) Presencia de credenciales
+    key = (
+        st.secrets.get("OPENAI_API_KEY")
+        or st.secrets.get("openai_api_key")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    res["api_key_present"] = bool(key)
+    res["organization_set"] = bool(st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG"))
+    res["base_url_set"] = bool(st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL"))
+
+    if not res["api_key_present"]:
+        res["error"] = "No se encontró OPENAI_API_KEY."
+        return res
+
+    # 2) Cliente + listar modelos
+    client = _get_openai_client()
+    if client is None:
+        res["error"] = "No se pudo inicializar el cliente OpenAI."
+        return res
+
+    try:
+        _ = client.models.list()
+        res["list_models_ok"] = True
+    except Exception as e:
+        res["error"] = f"Error listando modelos: {e}"
+        # A veces aquí ya aparece insufficient_quota o invalid_api_key
+        msg = str(e).lower()
+        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
+            res["quota_ok"] = False
+        return res
+
+    # 3) Mini-prueba de chat
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "Ping de diagnóstico. Responde: OK."}],
+            temperature=0,
+            max_tokens=5
+        )
+        res["chat_ok"] = True
+        # `usage` puede no estar siempre
+        try:
+            if hasattr(r, "usage") and r.usage and r.usage.total_tokens is not None:
+                res["usage_tokens"] = int(r.usage.total_tokens)
+        except Exception:
+            pass
+        # Si llegó aquí, no hubo error de cuota
+        res["quota_ok"] = True if res["quota_ok"] is None else res["quota_ok"]
+    except Exception as e:
+        msg = str(e)
+        res["error"] = f"Error en prueba de chat: {msg}"
+        low = msg.lower()
+        if "insufficient_quota" in low or "exceeded your current quota" in low:
+            res["quota_ok"] = False
+        else:
+            res["quota_ok"] = None
+    return res
+
 # ---------------------------
-# DIAGNÓSTICO CONEXIÓN OPENAI
+# DIAGNÓSTICO CONEXIÓN OPENAI (SIDEBAR)
 # ---------------------------
 with st.sidebar.expander("🔎 Diagnóstico OpenAI"):
     if st.button("Probar conexión OpenAI"):
@@ -221,27 +292,15 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
 # ---------------------------
 # PARSER DE INSTRUCCIONES
 # ---------------------------
-# Soporta:
-# 1) viz: tipo|cat|val|titulo (tipo in [barras,torta,tabla])
-# 2) grafico_barras:cat|val|titulo
-# 3) grafico_torta:cat|val|titulo
-# 4) tabla:cat|val[|titulo]
 VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
-
-def _apply_client_filter_to_df(df, cliente_txt):
-    if not cliente_txt: return df
-    cliente_col = next((c for c in df.columns if "cliente" in _norm(c)), None)
-    if not cliente_col: return df
-    out = df.copy()
-    return out[out[cliente_col].astype(str).str.contains(cliente_txt, case=False, na=False)]
 
 def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo, cliente_txt):
     cat = find_col(df, cat_raw); val = find_col(df, val_raw)
     if not cat or not val:
         st.warning(f"❗ No se pudo generar en '{hoja}'. Revisar columnas: '{cat_raw}' y '{val_raw}'."); return
     try:
-        plot_fn(_apply_client_filter_to_df(df, cliente_txt), cat, val, titulo)
+        plot_fn(df, cat, val, titulo)  # sin filtro por cliente
         st.session_state.aliases[_norm(cat_raw)] = cat
         st.session_state.aliases[_norm(val_raw)] = val
     except Exception as e:
@@ -257,43 +316,42 @@ def parse_and_render_instructions(respuesta_texto: str, data_dict: dict, cliente
             tipo = parts[0].lower()
             cat_raw, val_raw = parts[1], parts[2]
             titulo = parts[3] if len(parts) >= 4 else None
-            # buscar la 1ª hoja que calce
             for hoja, df in data_dict.items():
                 if find_col(df, cat_raw) and find_col(df, val_raw):
-                    if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo, cliente_txt)
-                    elif tipo == "torta":  _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo, cliente_txt)
-                    else:                  _safe_plot(lambda d,a,b,t: mostrar_tabla(d,a,b,t or f"Tabla ({hoja})"), hoja, df, cat_raw, val_raw, titulo, cliente_txt)
+                    if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo, "")
+                    elif tipo == "torta":  _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo, "")
+                    else:                  _safe_plot(lambda d,a,b,t: mostrar_tabla(d,a,b,t or f"Tabla ({hoja})"), hoja, df, cat_raw, val_raw, titulo, "")
                     return
 
-    # 2) formatos antiguos (compatibilidad)
+    # 2) compatibilidad con formatos antiguos
     for m in ALT_PATT.finditer(respuesta_texto):
         kind = m.group(1).lower()
         hoja_sel = m.group(2)
         body = m.group(3).strip().strip("`").lstrip("-*• ").strip()
         parts = [p.strip(" `*-•").strip() for p in body.split("|")]
         if kind in ("grafico_torta","grafico_barras"):
-            if len(parts) != 3: 
+            if len(parts) != 3:
                 st.warning("Instrucción de gráfico inválida."); 
                 continue
             cat_raw, val_raw, title = parts
             if hoja_sel and hoja_sel in data_dict:
                 _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                          hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title, cliente_txt)
+                          hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title, "")
             else:
                 for hoja, df in data_dict.items():
                     if find_col(df, cat_raw) and find_col(df, val_raw):
                         _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                                  hoja, df, cat_raw, val_raw, title, cliente_txt)
+                                  hoja, df, cat_raw, val_raw, title, "")
                         break
         else:
-            if len(parts) not in (2,3): 
+            if len(parts) not in (2,3):
                 st.warning("Instrucción de tabla inválida.")
                 continue
             cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
             def draw(df, hoja):
                 cat = find_col(df, cat_raw); val = find_col(df, val_raw)
                 if cat and val:
-                    mostrar_tabla(_apply_client_filter_to_df(df, cliente_txt), cat, val, title or f"Tabla: {val} por {cat} ({hoja})")
+                    mostrar_tabla(df, cat, val, title or f"Tabla: {val} por {cat} ({hoja})")
                     st.session_state.aliases[_norm(cat_raw)] = cat
                     st.session_state.aliases[_norm(val_raw)] = val
                     return True
@@ -320,7 +378,6 @@ def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     return schema
 
 def plan_from_llm(pregunta: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-    modo = st.session_state.get("modo_respuesta", "Analítico (detallado)")
     system = "Eres un controller financiero experto. Sé concreto y útil."
     prompt = f"""
 Devuelve SOLO un JSON con el mejor plan de visualización si corresponde:
@@ -377,7 +434,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -
                     cat_real = c; break
         if not (cat_real and val_real): continue
 
-        df_fil = _apply_client_filter_to_df(df, cliente_txt)
+        df_fil = df.copy()  # sin filtro por cliente
 
         if action == "chart" and chart == "auto":
             chart = _choose_chart_auto(df_fil, cat_real, val_real)
@@ -417,24 +474,17 @@ def _date_col(df: pd.DataFrame):
 def _count_col(df: pd.DataFrame):
     return _first_col_with(df, ["estado", "resultado", "situacion", "situación", "status"])
 
-def _apply_client_filter_df(df: pd.DataFrame, client_txt: str) -> pd.DataFrame:
-    if not client_txt: return df
-    cli = _first_col_with(df, ["cliente"])
-    if not cli: return df
-    out = df.copy()
-    return out[out[cli].astype(str).str.contains(client_txt, case=False, na=False)]
-
-def render_kpi_dashboard(data: dict, cliente_txt: str):
+def render_kpi_dashboard(data: dict):
     st.markdown("#### 📊 Dashboard")
     c1, c2, c3 = st.columns(3)
 
-    # 1) Top-10 Clientes
+    # 1) Top-10 Clientes (si existen columnas necesarias)
     plotted1 = False
     for hoja, df in data.items():
         cli = _first_col_with(df, ["cliente"])
         val = _ing_col(df)
         if cli and val:
-            df2 = _apply_client_filter_df(df, cliente_txt).copy()
+            df2 = df.copy()
             vals = pd.to_numeric(df2[val], errors="coerce")
             top = (df2.assign(__v=vals).groupby(cli, dropna=False)["__v"]
                      .sum().sort_values(ascending=False).head(10))
@@ -451,7 +501,7 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
     for hoja, df in data.items():
         est = _count_col(df)
         if est:
-            df2 = _apply_client_filter_df(df, cliente_txt)
+            df2 = df.copy()
             dist = df2[est].astype(str).str.strip().str.title().value_counts().head(8)
             if len(dist) >= 1:
                 with c2:
@@ -471,7 +521,7 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
     for hoja, df in data.items():
         val = _ing_col(df); fec = _date_col(df)
         if val and fec:
-            df2 = _apply_client_filter_df(df, cliente_txt).copy()
+            df2 = df.copy()
             df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
             df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
             g = (df2.dropna(subset=[fec])
@@ -576,12 +626,12 @@ Eres auditor financiero. Con el resumen numérico siguiente, emite diagnóstico,
 # ---------------------------
 # CÁLCULOS DE APOYO (DIAGNÓSTICO NUMÉRICO)
 # ---------------------------
-def _tendencia_mensual_global(data: dict, cliente_txt: str):
+def _tendencia_mensual_global(data: dict):
     ser_total = None
     for _, df in data.items():
         val = _ing_col(df); fec = _date_col(df)
         if val and fec:
-            df2 = _apply_client_filter_df(df, cliente_txt).copy()
+            df2 = df.copy()
             df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
             df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
             g = (df2.dropna(subset=[fec])
@@ -593,8 +643,7 @@ def _tendencia_mensual_global(data: dict, cliente_txt: str):
     s = ser_total.dropna()
     return s
 
-def _proyeccion_lineal(serie_mensual: pd.Series, meses=3):
-    # Ajuste simple por regresión lineal en índice (0..n-1)
+def _proyeccion_lineal(serie_mensual: pd.Series, meses=6):
     y = serie_mensual.values.astype(float)
     x = np.arange(len(y))
     coef = np.polyfit(x, y, 1)
@@ -611,9 +660,9 @@ def _concentracion_topn(df: pd.DataFrame, cliente_col: str, val_col: str, n=5):
     share_top = dist.sort_values(ascending=False).head(n).sum() / total
     return float(share_top)
 
-def _resumen_numerico(data: dict, cliente_txt: str):
-    kpis = analizar_datos_taller(data, cliente_txt)
-    serie = _tendencia_mensual_global(data, cliente_txt)
+def _resumen_numerico(data: dict):
+    kpis = analizar_datos_taller(data, "")  # sin filtro de cliente
+    serie = _tendencia_mensual_global(data)
     proy = None; coef = None
     if serie is not None:
         coef, proy_vals = _proyeccion_lineal(serie, meses=6)
@@ -687,15 +736,9 @@ elif st.session_state.menu_sel == "Vista previa":
         st.info("Carga datos en la sección **Datos**.")
     else:
         st.markdown("### 📄 Hojas")
-        cliente_txt = st.text_input("Filtro: Cliente contiene…", value="")
         for name, df in data.items():
-            dfv = df.copy()
-            if cliente_txt:
-                cli_col = next((c for c in df.columns if "cliente" in _norm(c)), None)
-                if cli_col:
-                    dfv = dfv[dfv[cli_col].astype(str).str.contains(cliente_txt, case=False, na=False)]
-            st.markdown(f"#### 📘 {name} • filas: {len(dfv)}")
-            st.dataframe(dfv.head(10), use_container_width=True)
+            st.markdown(f"#### 📘 {name} • filas: {len(df)}")
+            st.dataframe(df.head(10), use_container_width=True)
 
 # ----------- KPIs -----------
 elif st.session_state.menu_sel == "KPIs":
@@ -703,8 +746,7 @@ elif st.session_state.menu_sel == "KPIs":
     if not data:
         st.info("Carga datos en la sección **Datos**.")
     else:
-        cliente_txt = st.text_input("Filtro: Cliente contiene…", value="")
-        kpis = analizar_datos_taller(data, cliente_txt)
+        kpis = analizar_datos_taller(data, "")  # sin filtro
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
         c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
@@ -719,7 +761,7 @@ elif st.session_state.menu_sel == "KPIs":
         lt = kpis.get("lead_time_mediano_dias")
         if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
 
-        render_kpi_dashboard(data, cliente_txt)
+        render_kpi_dashboard(data)
 
 # ----------- Consulta IA -----------
 elif st.session_state.menu_sel == "Consulta IA":
@@ -727,27 +769,26 @@ elif st.session_state.menu_sel == "Consulta IA":
     if not data:
         st.info("Carga datos en la sección **Datos**.")
     else:
-        cliente_txt = st.text_input("Filtro: Cliente contiene…", value="")
         st.markdown("### 🤖 Consulta")
         pregunta = st.text_area("Pregunta")
         c1b, c2b = st.columns(2)
         if c1b.button("📊 Análisis General Automático"):
-            analisis = analizar_datos_taller(data, cliente_txt)
+            analisis = analizar_datos_taller(data, "")
             r = ask_gpt(prompt_analisis_general(analisis))
             st.markdown(r)
             st.session_state.historial.append({"pregunta":"Análisis general","respuesta":r})
-            parse_and_render_instructions(r, data, cliente_txt)
+            parse_and_render_instructions(r, data, "")
 
         if c2b.button("Responder") and pregunta:
             schema = _build_schema(data)
             plan = plan_from_llm(pregunta, schema)
             executed = False
-            if plan: executed = execute_plan(plan, data, cliente_txt)
+            if plan: executed = execute_plan(plan, data, "")
             if not executed:
                 r = ask_gpt(prompt_consulta_libre(pregunta, schema))
                 st.markdown(r)
                 st.session_state.historial.append({"pregunta":pregunta,"respuesta":r})
-                parse_and_render_instructions(r, data, cliente_txt)
+                parse_and_render_instructions(r, data, "")
 
 # ----------- Historial -----------
 elif st.session_state.menu_sel == "Historial":
@@ -765,10 +806,9 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
         st.info("Carga datos en la sección **Datos**.")
     else:
         st.markdown("### 🩺 Diagnóstico IA")
-        cliente_txt = st.text_input("Filtro: Cliente contiene…", value="")
-        ctx = _resumen_numerico(data, cliente_txt)
+        ctx = _resumen_numerico(data)
 
-        # Bloque numérico compacto
+        # Bloque numérico compacto (sin filtro por cliente)
         st.subheader("Resumen numérico")
         st.json(ctx)
 
@@ -782,8 +822,34 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             fig.autofmt_xdate()
             st.pyplot(fig)
 
+        # --- Nuevo: Diagnóstico de API OpenAI desde esta sección ---
+        st.markdown("---")
+        st.subheader("🔎 Diagnóstico de la IA (OpenAI)")
+        if st.button("Diagnosticar IA"):
+            diag = diagnosticar_openai()
+
+            # Resultados claros
+            st.write("**Clave configurada:** ", "✅" if diag["api_key_present"] else "❌")
+            st.write("**Organization seteada:** ", "✅" if diag["organization_set"] else "—")
+            st.write("**Base URL personalizada:** ", "✅" if diag["base_url_set"] else "—")
+            st.write("**Listar modelos:** ", "✅" if diag["list_models_ok"] else "❌")
+            st.write("**Prueba de chat:** ", "✅" if diag["chat_ok"] else "❌")
+            if diag["quota_ok"] is True:
+                st.success("Créditos/cuota: OK")
+            elif diag["quota_ok"] is False:
+                st.error("❌ Sin créditos/cuota (insufficient_quota). Carga saldo o revisa tu plan.")
+            else:
+                st.info("No se pudo determinar el estado de la cuota (revisa el mensaje de error).")
+
+            if diag["usage_tokens"] is not None:
+                st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
+
+            if diag["error"]:
+                st.warning(f"Detalle: {diag['error']}")
+
         if st.button("Generar diagnóstico con IA"):
             r = ask_gpt(prompt_diagnostico_ia(ctx))
             st.markdown(r)
             st.session_state.historial.append({"pregunta":"Diagnóstico IA","respuesta":r})
-            parse_and_render_instructions(r, data, cliente_txt)
+            parse_and_render_instructions(r, data, "")
+
