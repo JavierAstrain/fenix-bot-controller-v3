@@ -9,7 +9,7 @@ import json
 import re
 import unicodedata
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
 from analizador import analizar_datos_taller
@@ -29,7 +29,6 @@ if "__ultima_vista__" not in st.session_state: st.session_state["__ultima_vista_
 if "max_cats_grafico" not in st.session_state: st.session_state.max_cats_grafico = 18
 if "top_n_grafico" not in st.session_state:    st.session_state.top_n_grafico = 12
 if "aliases" not in st.session_state:          st.session_state.aliases = {}
-if "modo_respuesta" not in st.session_state:   st.session_state.modo_respuesta = "Analítico (detallado)"
 if "menu_sel" not in st.session_state:         st.session_state.menu_sel = "KPIs"
 
 # ---------------------------
@@ -49,7 +48,7 @@ def load_gsheet(json_keyfile: str, sheet_url: str):
     return {ws.title: pd.DataFrame(ws.get_all_records()) for ws in sheet.worksheets()}
 
 # ---------------------------
-# OPENAI (ROBUSTO)
+# OPENAI
 # ---------------------------
 def _get_openai_client():
     api_key = (
@@ -79,27 +78,25 @@ def ask_gpt(messages) -> str:
         resp = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.2
+            temperature=0.15
         )
         return resp.choices[0].message.content
     except Exception as e:
         st.error(f"Fallo en la petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
-# --- Diagnóstico detallado de OpenAI (para la sección Diagnóstico IA) ---
 def diagnosticar_openai():
-    """Devuelve un dict con el estado de la API, prueba de chat y señales de cuota."""
+    """Diagnóstico de credenciales/cuota."""
     res = {
         "api_key_present": False,
         "organization_set": False,
         "base_url_set": False,
         "list_models_ok": False,
         "chat_ok": False,
-        "quota_ok": None,           # True/False/None
+        "quota_ok": None,
         "usage_tokens": None,
         "error": None
     }
-    # 1) Presencia de credenciales
     key = (
         st.secrets.get("OPENAI_API_KEY")
         or st.secrets.get("openai_api_key")
@@ -108,12 +105,10 @@ def diagnosticar_openai():
     res["api_key_present"] = bool(key)
     res["organization_set"] = bool(st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG"))
     res["base_url_set"] = bool(st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL"))
-
     if not res["api_key_present"]:
         res["error"] = "No se encontró OPENAI_API_KEY."
         return res
 
-    # 2) Cliente + listar modelos
     client = _get_openai_client()
     if client is None:
         res["error"] = "No se pudo inicializar el cliente OpenAI."
@@ -123,14 +118,12 @@ def diagnosticar_openai():
         _ = client.models.list()
         res["list_models_ok"] = True
     except Exception as e:
-        res["error"] = f"Error listando modelos: {e}"
-        # A veces aquí ya aparece insufficient_quota o invalid_api_key
         msg = str(e).lower()
+        res["error"] = f"Error listando modelos: {e}"
         if "insufficient_quota" in msg or "exceeded your current quota" in msg:
             res["quota_ok"] = False
         return res
 
-    # 3) Mini-prueba de chat
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -139,36 +132,20 @@ def diagnosticar_openai():
             max_tokens=5
         )
         res["chat_ok"] = True
-        # `usage` puede no estar siempre
         try:
             if hasattr(r, "usage") and r.usage and r.usage.total_tokens is not None:
                 res["usage_tokens"] = int(r.usage.total_tokens)
         except Exception:
             pass
-        # Si llegó aquí, no hubo error de cuota
-        res["quota_ok"] = True if res["quota_ok"] is None else res["quota_ok"]
+        if res["quota_ok"] is None: res["quota_ok"] = True
     except Exception as e:
-        msg = str(e)
-        res["error"] = f"Error en prueba de chat: {msg}"
-        low = msg.lower()
-        if "insufficient_quota" in low or "exceeded your current quota" in low:
+        msg = str(e).lower()
+        res["error"] = f"Error en prueba de chat: {e}"
+        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
             res["quota_ok"] = False
         else:
             res["quota_ok"] = None
     return res
-
-# ---------------------------
-# DIAGNÓSTICO CONEXIÓN OPENAI (SIDEBAR)
-# ---------------------------
-with st.sidebar.expander("🔎 Diagnóstico OpenAI"):
-    if st.button("Probar conexión OpenAI"):
-        client = _get_openai_client()
-        if client:
-            try:
-                models = client.models.list()
-                st.success(f"OK. Modelos disponibles: {len(models.data)}")
-            except Exception as e:
-                st.error(f"No se pudo listar modelos: {e}")
 
 # ---------------------------
 # UTILIDADES
@@ -220,8 +197,6 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
                        "tabla.csv", "text/csv")
 
 def _barras_vertical(resumen, col_categoria, col_valor, titulo):
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as mtick
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
@@ -236,8 +211,6 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as mtick
     fig, ax = plt.subplots()
     bars = ax.barh(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
@@ -271,7 +244,6 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
     if recorte: st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
 
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
-    import matplotlib.pyplot as plt
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
                  .sum().sort_values(ascending=False))
@@ -290,80 +262,81 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     return "table"
 
 # ---------------------------
-# PARSER DE INSTRUCCIONES
+# PARSER/HELPERS PARA TEXTO+VIZ
 # ---------------------------
 VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
-def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo, cliente_txt):
+def split_text_and_viz(respuesta_texto: str):
+    """Devuelve (texto_sin_viz, lista_instrucciones)."""
+    text = respuesta_texto
+    instr = []
+    # viz: ...
+    for m in VIZ_PATT.finditer(respuesta_texto):
+        body = m.group(1).strip().strip("`").lstrip("-*• ").strip()
+        parts = [p.strip(" `*-•").strip() for p in body.split("|")]
+        if len(parts) >= 3:
+            instr.append(("viz", parts))
+        text = text.replace(m.group(0), "")
+    # formatos antiguos
+    for m in ALT_PATT.finditer(respuesta_texto):
+        kind = m.group(1).lower()
+        hoja = m.group(2)
+        body = m.group(3).strip().strip("`").lstrip("-*• ").strip()
+        parts = [p.strip(" `*-•").strip() for p in body.split("|")]
+        instr.append((kind, hoja, parts))
+        text = text.replace(m.group(0), "")
+    return text.strip(), instr
+
+def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo):
     cat = find_col(df, cat_raw); val = find_col(df, val_raw)
     if not cat or not val:
         st.warning(f"❗ No se pudo generar en '{hoja}'. Revisar columnas: '{cat_raw}' y '{val_raw}'."); return
     try:
-        plot_fn(df, cat, val, titulo)  # sin filtro por cliente
+        plot_fn(df, cat, val, titulo)
         st.session_state.aliases[_norm(cat_raw)] = cat
         st.session_state.aliases[_norm(val_raw)] = val
     except Exception as e:
         st.error(f"Error generando visualización en '{hoja}': {e}")
 
-def parse_and_render_instructions(respuesta_texto: str, data_dict: dict, cliente_txt: str):
-    # 1) nuevo formato viz:
-    m = VIZ_PATT.search(respuesta_texto)
-    if m:
-        body = m.group(1).strip().strip("`").lstrip("-*• ").strip()
-        parts = [p.strip(" `*-•").strip() for p in body.split("|")]
-        if len(parts) >= 3:
+def render_viz_instructions(instr_list, data_dict):
+    """Ejecuta la primera instrucción que haga match con alguna hoja."""
+    if not instr_list: return False
+    # Prioridad: viz: ... luego alternativas
+    for item in instr_list:
+        if item[0] == "viz":
+            _tipo, parts = item
             tipo = parts[0].lower()
             cat_raw, val_raw = parts[1], parts[2]
             titulo = parts[3] if len(parts) >= 4 else None
             for hoja, df in data_dict.items():
                 if find_col(df, cat_raw) and find_col(df, val_raw):
-                    if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo, "")
-                    elif tipo == "torta":  _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo, "")
-                    else:                  _safe_plot(lambda d,a,b,t: mostrar_tabla(d,a,b,t or f"Tabla ({hoja})"), hoja, df, cat_raw, val_raw, titulo, "")
-                    return
-
-    # 2) compatibilidad con formatos antiguos
-    for m in ALT_PATT.finditer(respuesta_texto):
-        kind = m.group(1).lower()
-        hoja_sel = m.group(2)
-        body = m.group(3).strip().strip("`").lstrip("-*• ").strip()
-        parts = [p.strip(" `*-•").strip() for p in body.split("|")]
-        if kind in ("grafico_torta","grafico_barras"):
-            if len(parts) != 3:
-                st.warning("Instrucción de gráfico inválida."); 
-                continue
-            cat_raw, val_raw, title = parts
-            if hoja_sel and hoja_sel in data_dict:
-                _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                          hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title, "")
-            else:
+                    if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo); return True
+                    if tipo == "torta":    _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo); return True
+                    _safe_plot(lambda d,a,b,t: mostrar_tabla(d,a,b,t or f"Tabla ({hoja})"), hoja, df, cat_raw, val_raw, titulo); return True
+        else:
+            kind, hoja_sel, parts = item
+            if kind in ("grafico_torta","grafico_barras"):
+                if len(parts) != 3: continue
+                cat_raw, val_raw, title = parts
+                if hoja_sel and hoja_sel in data_dict:
+                    _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
+                              hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title); return True
                 for hoja, df in data_dict.items():
                     if find_col(df, cat_raw) and find_col(df, val_raw):
                         _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                                  hoja, df, cat_raw, val_raw, title, "")
-                        break
-        else:
-            if len(parts) not in (2,3):
-                st.warning("Instrucción de tabla inválida.")
-                continue
-            cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
-            def draw(df, hoja):
-                cat = find_col(df, cat_raw); val = find_col(df, val_raw)
-                if cat and val:
-                    mostrar_tabla(df, cat, val, title or f"Tabla: {val} por {cat} ({hoja})")
-                    st.session_state.aliases[_norm(cat_raw)] = cat
-                    st.session_state.aliases[_norm(val_raw)] = val
-                    return True
-                return False
-            if hoja_sel and hoja_sel in data_dict:
-                draw(data_dict[hoja_sel], hoja_sel)
+                                  hoja, df, cat_raw, val_raw, title); return True
             else:
-                for hoja, df in data_dict.items(): 
-                    if draw(df, hoja): break
+                # tabla:cat|val|titulo?
+                if len(parts) not in (2,3): continue
+                cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
+                for hoja, df in data_dict.items():
+                    if find_col(df, cat_raw) and find_col(df, val_raw):
+                        mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw), title); return True
+    return False
 
 # ---------------------------
-# SCHEMA + PLANNER + EXECUTOR
+# SCHEMA + PLANNER (para fallback de viz)
 # ---------------------------
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -408,7 +381,7 @@ PREGUNTA:
     except Exception:
         return {}
 
-def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -> bool:
+def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
     action = plan.get("action")
     if action not in ("table","chart","text"): return False
     if action == "text": return False
@@ -434,7 +407,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -
                     cat_real = c; break
         if not (cat_real and val_real): continue
 
-        df_fil = df.copy()  # sin filtro por cliente
+        df_fil = df.copy()
 
         if action == "chart" and chart == "auto":
             chart = _choose_chart_auto(df_fil, cat_real, val_real)
@@ -454,124 +427,37 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -
     return False
 
 # ---------------------------
-# KPI DASHBOARD (GENÉRICO)
-# ---------------------------
-def _first_col_with(df: pd.DataFrame, keys):
-    for c in df.columns:
-        if any(k in _norm(str(c)) for k in keys):
-            return c
-    return None
-
-def _ing_col(df: pd.DataFrame):
-    for k in ["monto", "neto", "total", "importe", "facturacion", "ingreso", "venta", "principal"]:
-        c = _first_col_with(df, [k])
-        if c is not None: return c
-    return None
-
-def _date_col(df: pd.DataFrame):
-    return _first_col_with(df, ["fecha", "mes", "emision", "emisión"])
-
-def _count_col(df: pd.DataFrame):
-    return _first_col_with(df, ["estado", "resultado", "situacion", "situación", "status"])
-
-def render_kpi_dashboard(data: dict):
-    st.markdown("#### 📊 Dashboard")
-    c1, c2, c3 = st.columns(3)
-
-    # 1) Top-10 Clientes (si existen columnas necesarias)
-    plotted1 = False
-    for hoja, df in data.items():
-        cli = _first_col_with(df, ["cliente"])
-        val = _ing_col(df)
-        if cli and val:
-            df2 = df.copy()
-            vals = pd.to_numeric(df2[val], errors="coerce")
-            top = (df2.assign(__v=vals).groupby(cli, dropna=False)["__v"]
-                     .sum().sort_values(ascending=False).head(10))
-            with c1:
-                st.caption(f"Top-10 Clientes ({hoja})")
-                _barras_horizontal(top, cli, val, titulo=None)
-            plotted1 = True
-            break
-    if not plotted1:
-        with c1: st.info("No se encontró columna de cliente para Top-10.")
-
-    # 2) Distribución por Estado
-    plotted2 = False
-    for hoja, df in data.items():
-        est = _count_col(df)
-        if est:
-            df2 = df.copy()
-            dist = df2[est].astype(str).str.strip().str.title().value_counts().head(8)
-            if len(dist) >= 1:
-                with c2:
-                    st.caption(f"Distribución por Estado ({hoja})")
-                    fig, ax = plt.subplots()
-                    ax.pie(dist.values, labels=dist.index.astype(str), autopct="%1.0f%%", startangle=90)
-                    ax.axis("equal")
-                    st.pyplot(fig)
-                    st.download_button("⬇️ PNG", _export_fig(fig), "kpi_estado.png", "image/png")
-                plotted2 = True
-                break
-    if not plotted2:
-        with c2: st.info("No se encontró columna de estado para distribución.")
-
-    # 3) Tendencia mensual (multi-hoja)
-    ser_total = None
-    for hoja, df in data.items():
-        val = _ing_col(df); fec = _date_col(df)
-        if val and fec:
-            df2 = df.copy()
-            df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
-            df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
-            g = (df2.dropna(subset=[fec])
-                    .set_index(fec)
-                    .groupby(pd.Grouper(freq="M"))["__v"].sum())
-            ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
-    if ser_total is not None and len(ser_total.dropna()) >= 2:
-        with c3:
-            st.caption("Tendencia Mensual de Ingresos (todas las hojas con fecha)")
-            fig, ax = plt.subplots()
-            ax.plot(ser_total.index, ser_total.values, marker="o")
-            ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
-            fig.autofmt_xdate()
-            st.pyplot(fig)
-            st.download_button("⬇️ PNG", _export_fig(fig), "kpi_tendencia.png", "image/png")
-    else:
-        with c3: st.info("No se detectaron fechas para tendencia mensual.")
-
-# ---------------------------
-# IA – PROMPTS ESTRICTOS
+# IA – PROMPTS ESTRICTOS (sin fuentes raras y 100% planilla)
 # ---------------------------
 def make_system_prompt():
-    modo = st.session_state.get("modo_respuesta","Analítico (detallado)")
-    tono = "breve, ejecutivo (5–7 frases)" if "Ejecutivo" in modo else "analítico, riguroso y accionable"
     return (
-        "Actúas como un Controller Financiero senior especializado en talleres de desabolladura y pintura. "
-        f"Tono {tono}. Responde siempre con secciones Markdown claras."
+        "Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
+        "Responde SIEMPRE con texto claro en Markdown, sin bloques de código, sin tipografías especiales ni emojis. "
+        "Tu estilo combina: ejecutivo (conclusiones claras) + analítico (fundamentos y números). "
+        "Toda la respuesta debe basarse EXCLUSIVAMENTE en los datos entregados por la planilla; "
+        "si un dato no está, indica 'No disponible en planilla'. No uses conocimiento externo."
     )
 
 ANALYSIS_FORMAT = """
-Devuelve SIEMPRE en este formato Markdown (en español):
+Escribe SIEMPRE en este formato (solo Markdown simple y guiones '-' en bullets):
 
 ### Resumen ejecutivo
-• 3–5 puntos clave con cifras redondeadas.
+- 3 a 5 puntos clave con cifras redondeadas y contexto.
 
 ### Diagnóstico
-• Qué está bien / mal y por qué (drivers).
+- Qué está bien / mal y por qué (drivers por línea de negocio, clientes, estados, tiempos, etc.).
 
 ### Estimaciones y proyecciones
-• Proyección 3–6 meses (con supuestos explícitos).  
-• Incluye rangos (optimista/base/conservador).
+- Proyección 3–6 meses con supuestos explícitos y tres escenarios: optimista, base y conservador.
 
-### Recomendaciones
-• 5–8 acciones concretas y priorizadas (con impacto y dificultad).
+### Recomendaciones de gestión
+- 5–8 acciones priorizadas (impacto estimado y dificultad operacional).
 
 ### Riesgos y alertas
-• 3–5 riesgos y cómo mitigarlos.
+- 3–5 riesgos y mitigaciones.
 
-### Próximos pasos (dueños y fechas)
-• Lista corta, muy específica.
+### Próximos pasos
+- Dueños, plazos y métrica objetivo.
 
 Al final, si ayuda, añade UNA sola instrucción de visualización en alguna de estas formas (una línea):
 viz: barras|<categoria>|<valor>|<título opcional>
@@ -584,7 +470,7 @@ def prompt_analisis_general(analisis_dict: dict) -> list:
         {"role":"system","content": make_system_prompt()},
         {"role":"user","content": f"""
 Con base en los siguientes KPIs calculados reales, realiza un ANÁLISIS PROFESIONAL siguiendo el formato obligatorio.
-No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos.
+No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos de forma conservadora.
 
 KPIs:
 {json.dumps(analisis_dict, ensure_ascii=False, indent=2)}
@@ -595,14 +481,14 @@ KPIs:
 
 def prompt_consulta_libre(pregunta: str, schema: dict) -> list:
     historial_msgs = []
-    for h in st.session_state.historial[-8:]:
+    for h in st.session_state.historial[-6:]:
         historial_msgs += [{"role":"user","content":h["pregunta"]},
                            {"role":"assistant","content":h["respuesta"]}]
     return [
         {"role":"system","content": make_system_prompt()},
         *historial_msgs,
         {"role":"user","content": f"""
-Contesta la siguiente pregunta usando el esquema de datos; si corresponde incluye UNA instrucción de visualización.
+Contesta la siguiente pregunta usando el esquema de datos; SIEMPRE incluye el análisis completo del formato y, si aplica, UNA instrucción de visualización.
 Pregunta: {pregunta}
 
 Esquema (hojas, columnas y ejemplos):
@@ -611,83 +497,6 @@ Esquema (hojas, columnas y ejemplos):
 {ANALYSIS_FORMAT}
 """}
     ]
-
-def prompt_diagnostico_ia(contexto_cuant: dict) -> list:
-    return [
-        {"role":"system","content": make_system_prompt()},
-        {"role":"user","content": f"""
-Eres auditor financiero. Con el resumen numérico siguiente, emite diagnóstico, proyecciones y plan de acción.
-{json.dumps(contexto_cuant, ensure_ascii=False, indent=2)}
-
-{ANALYSIS_FORMAT}
-"""}
-    ]
-
-# ---------------------------
-# CÁLCULOS DE APOYO (DIAGNÓSTICO NUMÉRICO)
-# ---------------------------
-def _tendencia_mensual_global(data: dict):
-    ser_total = None
-    for _, df in data.items():
-        val = _ing_col(df); fec = _date_col(df)
-        if val and fec:
-            df2 = df.copy()
-            df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
-            df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
-            g = (df2.dropna(subset=[fec])
-                    .set_index(fec)
-                    .groupby(pd.Grouper(freq="M"))["__v"].sum())
-            ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
-    if ser_total is None or len(ser_total.dropna()) < 3:
-        return None
-    s = ser_total.dropna()
-    return s
-
-def _proyeccion_lineal(serie_mensual: pd.Series, meses=6):
-    y = serie_mensual.values.astype(float)
-    x = np.arange(len(y))
-    coef = np.polyfit(x, y, 1)
-    pred = []
-    for i in range(1, meses+1):
-        pred.append(np.polyval(coef, len(y)-1 + i))
-    return coef.tolist(), pred
-
-def _concentracion_topn(df: pd.DataFrame, cliente_col: str, val_col: str, n=5):
-    vals = pd.to_numeric(df[val_col], errors="coerce")
-    dist = (df.assign(__v=vals).groupby(cliente_col, dropna=False)["__v"].sum())
-    total = dist.sum()
-    if total <= 0 or len(dist) == 0: return None
-    share_top = dist.sort_values(ascending=False).head(n).sum() / total
-    return float(share_top)
-
-def _resumen_numerico(data: dict):
-    kpis = analizar_datos_taller(data, "")  # sin filtro de cliente
-    serie = _tendencia_mensual_global(data)
-    proy = None; coef = None
-    if serie is not None:
-        coef, proy_vals = _proyeccion_lineal(serie, meses=6)
-        proy = {
-            "ultima_fecha": str(serie.index[-1].date()),
-            "hist_len": int(len(serie)),
-            "promedio_3m": float(serie.tail(3).mean()),
-            "promedio_6m": float(serie.tail(min(6,len(serie))).mean()),
-            "proyeccion_6m": [float(x) for x in proy_vals]
-        }
-
-    conc = None
-    for _, df in data.items():
-        cli = _first_col_with(df, ["cliente"])
-        val = _ing_col(df)
-        if cli and val:
-            conc = _concentracion_topn(df, cli, val, n=5)
-            if conc is not None: break
-
-    return {
-        "kpis": kpis,
-        "tendencia_mensual": list(zip([str(x.date()) for x in serie.index], [float(v) for v in serie.values])) if serie is not None else None,
-        "proyeccion_lineal": {"coef": coef, "detalles": proy} if proy else None,
-        "concentracion_top5_clientes": conc
-    }
 
 # ---------------------------
 # UI – SIDEBAR & PÁGINAS
@@ -704,7 +513,6 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("### Preferencias")
-    st.session_state.modo_respuesta = st.radio("Modo de respuesta", ["Ejecutivo (breve)","Analítico (detallado)"])
     st.session_state.max_cats_grafico = st.number_input("Máx. categorías para graficar", 6, 200, st.session_state.max_cats_grafico)
     st.session_state.top_n_grafico = st.number_input("Top-N por defecto (barras)", 5, 100, st.session_state.top_n_grafico)
 
@@ -714,7 +522,7 @@ if st.session_state.menu_sel == "Datos":
     fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
     if fuente == "Excel":
         file = st.file_uploader("Sube un Excel", type=["xlsx","xls"])
-        if file: 
+        if file:
             st.session_state.data = load_excel(file)
             st.success("Excel cargado.")
     else:
@@ -761,9 +569,70 @@ elif st.session_state.menu_sel == "KPIs":
         lt = kpis.get("lead_time_mediano_dias")
         if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
 
-        render_kpi_dashboard(data)
+        # Mini-dashboard
+        st.markdown("#### 📊 Dashboard")
+        c1d, c2d, c3d = st.columns(3)
 
-# ----------- Consulta IA -----------
+        # Top-10 clientes
+        plotted1 = False
+        for hoja, df in data.items():
+            cli = next((c for c in df.columns if "cliente" in _norm(c)), None)
+            val = next((c for c in df.columns if any(k in _norm(c) for k in ["monto","neto","total","importe","facturacion","ingreso","venta","principal"])), None)
+            if cli and val:
+                vals = pd.to_numeric(df[val], errors="coerce")
+                top = (df.assign(__v=vals).groupby(cli, dropna=False)["__v"]
+                         .sum().sort_values(ascending=False).head(10))
+                with c1d:
+                    st.caption(f"Top-10 Clientes ({hoja})")
+                    _barras_horizontal(top, cli, val, titulo=None)
+                plotted1 = True
+                break
+        if not plotted1:
+            with c1d: st.info("No se encontró columna de cliente para Top-10.")
+
+        # Estados
+        plotted2 = False
+        for hoja, df in data.items():
+            est = next((c for c in df.columns if any(k in _norm(c) for k in ["estado","resultado","situacion","situación","status"])), None)
+            if est:
+                dist = df[est].astype(str).str.strip().str.title().value_counts().head(8)
+                if len(dist) >= 1:
+                    with c2d:
+                        st.caption(f"Distribución por Estado ({hoja})")
+                        fig, ax = plt.subplots()
+                        ax.pie(dist.values, labels=dist.index.astype(str), autopct="%1.0f%%", startangle=90)
+                        ax.axis("equal")
+                        st.pyplot(fig)
+                        st.download_button("⬇️ PNG", _export_fig(fig), "kpi_estado.png", "image/png")
+                    plotted2 = True
+                    break
+        if not plotted2:
+            with c2d: st.info("No se encontró columna de estado para distribución.")
+
+        # Tendencia mensual
+        ser_total = None
+        for hoja, df in data.items():
+            val = next((c for c in df.columns if any(k in _norm(c) for k in ["monto","neto","total","importe","facturacion","ingreso","venta","principal"])), None)
+            fec = next((c for c in df.columns if any(k in _norm(c) for k in ["fecha","mes","emision","emisión"])), None)
+            if val and fec:
+                df2 = df.copy()
+                df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
+                df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
+                g = (df2.dropna(subset=[fec]).set_index(fec).groupby(pd.Grouper(freq="M"))["__v"].sum())
+                ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
+        if ser_total is not None and len(ser_total.dropna()) >= 2:
+            with c3d:
+                st.caption("Tendencia Mensual de Ingresos (todas las hojas con fecha)")
+                fig, ax = plt.subplots()
+                ax.plot(ser_total.index, ser_total.values, marker="o")
+                ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+                fig.autofmt_xdate()
+                st.pyplot(fig)
+                st.download_button("⬇️ PNG", _export_fig(fig), "kpi_tendencia.png", "image/png")
+        else:
+            with c3d: st.info("No se detectaron fechas para tendencia mensual.")
+
+# ----------- Consulta IA (texto a la izquierda, visual a la derecha) -----------
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
@@ -772,23 +641,38 @@ elif st.session_state.menu_sel == "Consulta IA":
         st.markdown("### 🤖 Consulta")
         pregunta = st.text_area("Pregunta")
         c1b, c2b = st.columns(2)
+
+        # Layout 50/50 para respuesta
+        left, right = st.columns([0.58, 0.42])
+
         if c1b.button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
-            r = ask_gpt(prompt_analisis_general(analisis))
-            st.markdown(r)
-            st.session_state.historial.append({"pregunta":"Análisis general","respuesta":r})
-            parse_and_render_instructions(r, data, "")
+            raw = ask_gpt(prompt_analisis_general(analisis))
+            texto, instr = split_text_and_viz(raw)
+            with left:
+                st.markdown(texto)
+            with right:
+                ok = render_viz_instructions(instr, data)
+                if not ok:
+                    # Fallback: si no hay instrucción de viz, intentar plan automático
+                    schema = _build_schema(data)
+                    plan = plan_from_llm("Gráfico sugerido según KPIs", schema)
+                    execute_plan(plan, data)
+            st.session_state.historial.append({"pregunta":"Análisis general","respuesta":texto})
 
         if c2b.button("Responder") and pregunta:
             schema = _build_schema(data)
-            plan = plan_from_llm(pregunta, schema)
-            executed = False
-            if plan: executed = execute_plan(plan, data, "")
-            if not executed:
-                r = ask_gpt(prompt_consulta_libre(pregunta, schema))
-                st.markdown(r)
-                st.session_state.historial.append({"pregunta":pregunta,"respuesta":r})
-                parse_and_render_instructions(r, data, "")
+            raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
+            texto, instr = split_text_and_viz(raw)
+            with left:
+                st.markdown(texto)
+            with right:
+                ok = render_viz_instructions(instr, data)
+                if not ok:
+                    # Fallback visual si no vino instrucción
+                    plan = plan_from_llm(pregunta, schema)
+                    execute_plan(plan, data)
+            st.session_state.historial.append({"pregunta":pregunta,"respuesta":texto})
 
 # ----------- Historial -----------
 elif st.session_state.menu_sel == "Historial":
@@ -799,57 +683,24 @@ elif st.session_state.menu_sel == "Historial":
     else:
         st.info("Aún no hay historial en esta sesión.")
 
-# ----------- Diagnóstico IA -----------
+# ----------- Diagnóstico IA (solo API) -----------
 elif st.session_state.menu_sel == "Diagnóstico IA":
-    data = st.session_state.data
-    if not data:
-        st.info("Carga datos en la sección **Datos**.")
-    else:
-        st.markdown("### 🩺 Diagnóstico IA")
-        ctx = _resumen_numerico(data)
-
-        # Bloque numérico compacto (sin filtro por cliente)
-        st.subheader("Resumen numérico")
-        st.json(ctx)
-
-        # Gráfico de tendencia si existe
-        if ctx["tendencia_mensual"]:
-            fechas = [pd.to_datetime(d) for d,_ in ctx["tendencia_mensual"]]
-            valores = [v for _,v in ctx["tendencia_mensual"]]
-            fig, ax = plt.subplots()
-            ax.plot(fechas, valores, marker="o")
-            ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
-            fig.autofmt_xdate()
-            st.pyplot(fig)
-
-        # --- Nuevo: Diagnóstico de API OpenAI desde esta sección ---
-        st.markdown("---")
-        st.subheader("🔎 Diagnóstico de la IA (OpenAI)")
-        if st.button("Diagnosticar IA"):
-            diag = diagnosticar_openai()
-
-            # Resultados claros
-            st.write("**Clave configurada:** ", "✅" if diag["api_key_present"] else "❌")
-            st.write("**Organization seteada:** ", "✅" if diag["organization_set"] else "—")
-            st.write("**Base URL personalizada:** ", "✅" if diag["base_url_set"] else "—")
-            st.write("**Listar modelos:** ", "✅" if diag["list_models_ok"] else "❌")
-            st.write("**Prueba de chat:** ", "✅" if diag["chat_ok"] else "❌")
-            if diag["quota_ok"] is True:
-                st.success("Créditos/cuota: OK")
-            elif diag["quota_ok"] is False:
-                st.error("❌ Sin créditos/cuota (insufficient_quota). Carga saldo o revisa tu plan.")
-            else:
-                st.info("No se pudo determinar el estado de la cuota (revisa el mensaje de error).")
-
-            if diag["usage_tokens"] is not None:
-                st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
-
-            if diag["error"]:
-                st.warning(f"Detalle: {diag['error']}")
-
-        if st.button("Generar diagnóstico con IA"):
-            r = ask_gpt(prompt_diagnostico_ia(ctx))
-            st.markdown(r)
-            st.session_state.historial.append({"pregunta":"Diagnóstico IA","respuesta":r})
-            parse_and_render_instructions(r, data, "")
-
+    st.markdown("### 🔎 Diagnóstico de la IA (OpenAI)")
+    st.caption("Verifica API Key, conexión, prueba mínima de chat y estado de créditos/cuota.")
+    if st.button("Diagnosticar IA"):
+        diag = diagnosticar_openai()
+        st.write("**Clave configurada:** ", "✅" if diag["api_key_present"] else "❌")
+        st.write("**Organization seteada:** ", "✅" if diag["organization_set"] else "—")
+        st.write("**Base URL personalizada:** ", "✅" if diag["base_url_set"] else "—")
+        st.write("**Listar modelos:** ", "✅" if diag["list_models_ok"] else "❌")
+        st.write("**Prueba de chat:** ", "✅" if diag["chat_ok"] else "❌")
+        if diag["quota_ok"] is True:
+            st.success("Créditos/cuota: OK")
+        elif diag["quota_ok"] is False:
+            st.error("❌ Sin créditos/cuota (insufficient_quota). Carga saldo o revisa tu plan.")
+        else:
+            st.info("No se pudo determinar el estado de la cuota (revisa el mensaje).")
+        if diag["usage_tokens"] is not None:
+            st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
+        if diag["error"]:
+            st.warning(f"Detalle: {diag['error']}")
