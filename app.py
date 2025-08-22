@@ -267,18 +267,67 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
 VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
+# --- Normalización de texto y montos en respuestas IA ---
+CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')  # ej: 1,234,567
+MILLONES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*millone?s\b')          # 42.9 millones / 1 millón
+
+def _fmt_pesos_str(x: int) -> str:
+    try:
+        return _fmt_pesos(int(x))
+    except Exception:
+        return str(x)
+
+def prettify_answer(text: str) -> str:
+    """Limpia estilos raros, normaliza bullets, pone $ y puntos a miles,
+       convierte 'X millones' a CLP y separa montos con '–'."""
+    if not text: return text
+    t = text
+
+    # Bullets y espacios/tipografías raras
+    t = t.replace("\u00A0", " ")        # NBSP -> espacio
+    t = t.replace("•", "- ")            # bullets uniformes
+    t = re.sub(r'([*_]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas inline
+
+    # Inserta espacio entre dígitos y letras pegadas: "688millones" -> "688 millones"
+    t = re.sub(r'(?<=\d)(?=[A-Za-zÁÉÍÓÚáéíóúñÑ])', ' ', t)
+    t = re.sub(r'(?<=[A-Za-zÁÉÍÓÚáéíóúñÑ])(?=\d)', ' ', t)
+
+    # Normaliza inicio de bullet
+    t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
+
+    # Números con coma -> CLP
+    def _to_clp(m):
+        n = int(m.group(1).replace(",", ""))   # "1,234,567" -> 1234567
+        return _fmt_pesos(n)                   # "$1.234.567"
+    t = CURRENCY_COMMA_RE.sub(_to_clp, t)
+
+    # "X millones" -> CLP
+    def _mill_to_clp(m):
+        raw = m.group(1)
+        raw = raw.replace(",", ".")
+        try:
+            val = float(raw) * 1_000_000
+            return _fmt_pesos(val)
+        except Exception:
+            return m.group(0)
+    t = MILLONES_RE.sub(_mill_to_clp, t)
+
+    # Listas de montos: coma o " y " -> guion largo
+    t = re.sub(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)              # $1.000, $2.000 -> $1.000 – $2.000
+    t = re.sub(r'(\$\d[\d\.]*)\s+y\s+(?=\$\d)', r'\1 – ', t, flags=re.I)  # $1.000 y $2.000 -> $1.000 – $2.000
+
+    return t.strip()
+
 def split_text_and_viz(respuesta_texto: str):
     """Devuelve (texto_sin_viz, lista_instrucciones)."""
     text = respuesta_texto
     instr = []
-    # viz: ...
     for m in VIZ_PATT.finditer(respuesta_texto):
         body = m.group(1).strip().strip("`").lstrip("-*• ").strip()
         parts = [p.strip(" `*-•").strip() for p in body.split("|")]
         if len(parts) >= 3:
             instr.append(("viz", parts))
         text = text.replace(m.group(0), "")
-    # formatos antiguos
     for m in ALT_PATT.finditer(respuesta_texto):
         kind = m.group(1).lower()
         hoja = m.group(2)
@@ -302,7 +351,6 @@ def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo):
 def render_viz_instructions(instr_list, data_dict):
     """Ejecuta la primera instrucción que haga match con alguna hoja."""
     if not instr_list: return False
-    # Prioridad: viz: ... luego alternativas
     for item in instr_list:
         if item[0] == "viz":
             _tipo, parts = item
@@ -327,7 +375,6 @@ def render_viz_instructions(instr_list, data_dict):
                         _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
                                   hoja, df, cat_raw, val_raw, title); return True
             else:
-                # tabla:cat|val|titulo?
                 if len(parts) not in (2,3): continue
                 cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
                 for hoja, df in data_dict.items():
@@ -336,7 +383,7 @@ def render_viz_instructions(instr_list, data_dict):
     return False
 
 # ---------------------------
-# SCHEMA + PLANNER (para fallback de viz)
+# SCHEMA + PLANNER (fallback de viz)
 # ---------------------------
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -569,7 +616,6 @@ elif st.session_state.menu_sel == "KPIs":
         lt = kpis.get("lead_time_mediano_dias")
         if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
 
-        # Mini-dashboard
         st.markdown("#### 📊 Dashboard")
         c1d, c2d, c3d = st.columns(3)
 
@@ -642,19 +688,18 @@ elif st.session_state.menu_sel == "Consulta IA":
         pregunta = st.text_area("Pregunta")
         c1b, c2b = st.columns(2)
 
-        # Layout 50/50 para respuesta
         left, right = st.columns([0.58, 0.42])
 
         if c1b.button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
             raw = ask_gpt(prompt_analisis_general(analisis))
             texto, instr = split_text_and_viz(raw)
+            texto = prettify_answer(texto)
             with left:
                 st.markdown(texto)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
-                    # Fallback: si no hay instrucción de viz, intentar plan automático
                     schema = _build_schema(data)
                     plan = plan_from_llm("Gráfico sugerido según KPIs", schema)
                     execute_plan(plan, data)
@@ -664,12 +709,12 @@ elif st.session_state.menu_sel == "Consulta IA":
             schema = _build_schema(data)
             raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
             texto, instr = split_text_and_viz(raw)
+            texto = prettify_answer(texto)
             with left:
                 st.markdown(texto)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
-                    # Fallback visual si no vino instrucción
                     plan = plan_from_llm(pregunta, schema)
                     execute_plan(plan, data)
             st.session_state.historial.append({"pregunta":pregunta,"respuesta":texto})
@@ -679,7 +724,8 @@ elif st.session_state.menu_sel == "Historial":
     if st.session_state.historial:
         for i, h in enumerate(st.session_state.historial[-20:], 1):
             st.markdown(f"**Q{i}:** {h['pregunta']}")
-            st.markdown(f"**A{i}:** {h['respuesta']}")
+            st.markdown(f"**A{i}:**")
+            st.markdown(h["respuesta"])
     else:
         st.info("Aún no hay historial en esta sesión.")
 
@@ -704,3 +750,4 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
