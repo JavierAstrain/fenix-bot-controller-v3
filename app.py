@@ -268,8 +268,13 @@ VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
 # --- Normalización de texto y montos en respuestas IA ---
-CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')  # ej: 1,234,567
-MILLONES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*millone?s\b')          # 42.9 millones / 1 millón
+CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')   # 1,234,567
+LIST_COMMA_SERIES_RE = re.compile(
+    r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
+    re.I
+)
+MILLONES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*millone?s\b')
+MILES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*mil\b')
 
 def _fmt_pesos_str(x: int) -> str:
     try:
@@ -279,32 +284,25 @@ def _fmt_pesos_str(x: int) -> str:
 
 def prettify_answer(text: str) -> str:
     """Limpia estilos raros, normaliza bullets, pone $ y puntos a miles,
-       convierte 'X millones' a CLP y separa montos con '–'."""
+       convierte 'X millones/mil' a CLP y formatea listas de montos."""
     if not text: return text
     t = text
 
-    # Bullets y espacios/tipografías raras
-    t = t.replace("\u00A0", " ")        # NBSP -> espacio
-    t = t.replace("•", "- ")            # bullets uniformes
-    t = re.sub(r'([*_]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas inline
+    # 0) limpiar backticks/cursivas y forzar saltos en bullets
+    t = t.replace("\u00A0", " ")
+    t = t.replace("•", "\n- ")                      # bullets en línea -> saltos de línea
+    t = re.sub(r'([*_`]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas/código inline
 
-    # Inserta espacio entre dígitos y letras pegadas: "688millones" -> "688 millones"
+    # 1) espacio entre dígitos y letras pegadas
     t = re.sub(r'(?<=\d)(?=[A-Za-zÁÉÍÓÚáéíóúñÑ])', ' ', t)
     t = re.sub(r'(?<=[A-Za-zÁÉÍÓÚáéíóúñÑ])(?=\d)', ' ', t)
 
-    # Normaliza inicio de bullet
+    # 2) normaliza inicio de bullet
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
 
-    # Números con coma -> CLP
-    def _to_clp(m):
-        n = int(m.group(1).replace(",", ""))   # "1,234,567" -> 1234567
-        return _fmt_pesos(n)                   # "$1.234.567"
-    t = CURRENCY_COMMA_RE.sub(_to_clp, t)
-
-    # "X millones" -> CLP
+    # 3) "X millones" y "X mil" -> CLP
     def _mill_to_clp(m):
-        raw = m.group(1)
-        raw = raw.replace(",", ".")
+        raw = m.group(1).replace(",", ".")
         try:
             val = float(raw) * 1_000_000
             return _fmt_pesos(val)
@@ -312,9 +310,37 @@ def prettify_answer(text: str) -> str:
             return m.group(0)
     t = MILLONES_RE.sub(_mill_to_clp, t)
 
-    # Listas de montos: coma o " y " -> guion largo
-    t = re.sub(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)              # $1.000, $2.000 -> $1.000 – $2.000
-    t = re.sub(r'(\$\d[\d\.]*)\s+y\s+(?=\$\d)', r'\1 – ', t, flags=re.I)  # $1.000 y $2.000 -> $1.000 – $2.000
+    def _mil_to_clp(m):
+        raw = m.group(1).replace(",", ".")
+        try:
+            val = float(raw) * 1_000
+            return _fmt_pesos(val)
+        except Exception:
+            return m.group(0)
+    t = MILES_RE.sub(_mil_to_clp, t)
+
+    # 4) Series de cantidades con comas o "y/e": conviértelas a $ y sepáralas con "–"
+    def _series_to_clp(m):
+        series = m.group(1)
+        nums = re.findall(r'\d{1,3}(?:,\d{3})+', series)
+        clp = [_fmt_pesos(int(n.replace(",", ""))) for n in nums]
+        return " – ".join(clp)
+    t = LIST_COMMA_SERIES_RE.sub(_series_to_clp, t)
+
+    # 5) Números sueltos con coma -> CLP
+    def _to_clp(m):
+        n = int(m.group(1).replace(",", ""))
+        return _fmt_pesos(n)
+    t = CURRENCY_COMMA_RE.sub(_to_clp, t)
+
+    # 6) Listas de $ separadas por coma o "y/e" -> guion largo
+    # aplicar hasta que no queden más coincidencias
+    while True:
+        t_new, n1 = re.subn(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)
+        t_new, n2 = re.subn(r'(\$\d[\d\.]*)\s+(?:y|e)\s+(?=\$\d)', r'\1 – ', t_new, flags=re.I)
+        t = t_new
+        if n1 + n2 == 0:
+            break
 
     return t.strip()
 
@@ -474,7 +500,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
     return False
 
 # ---------------------------
-# IA – PROMPTS ESTRICTOS (sin fuentes raras y 100% planilla)
+# IA – PROMPTS ESTRICTOS
 # ---------------------------
 def make_system_prompt():
     return (
@@ -665,7 +691,7 @@ elif st.session_state.menu_sel == "KPIs":
                 df2[fec] = pd.to_datetime(df2[fec], errors="coerce")
                 df2["__v"] = pd.to_numeric(df2[val], errors="coerce")
                 g = (df2.dropna(subset=[fec]).set_index(fec).groupby(pd.Grouper(freq="M"))["__v"].sum())
-                ser_total = g if ser_total is None else ser_total.add(g, fill_value=0)
+                ser_total = g if ser_total es None else ser_total.add(g, fill_value=0)
         if ser_total is not None and len(ser_total.dropna()) >= 2:
             with c3d:
                 st.caption("Tendencia Mensual de Ingresos (todas las hojas con fecha)")
