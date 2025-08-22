@@ -1,46 +1,50 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
-from openai import OpenAI
-from analizador import analizar_datos_taller, generar_tabla, generar_grafico
+import matplotlib.ticker as mtick
+import matplotlib
+import json, re, unicodedata, os
+from typing import Dict, Any, Optional
+from analizador import analizar_datos_taller
 
-st.set_page_config(page_title="Fénix Bot Controller", layout="wide")
+# --- CONFIG STREAMLIT ---
+st.set_page_config(page_title="Controller Financiero IA", layout="wide")
 
-# ------------------------
-# IA: función central
-# ------------------------
+# --- FORMATOS ---
+def fmt_pesos(x):
+    try:
+        return "$" + "{:,.0f}".format(x).replace(",", ".")
+    except:
+        return x
+
+def fmt_num(x):
+    try:
+        return "{:,.0f}".format(x).replace(",", ".")
+    except:
+        return x
+
+# --- OPENAI CLIENT ---
 def ask_gpt(prompt: str) -> str:
-    """
-    Cliente robusto OpenAI (SDK v1.x):
-    - Lee la API key desde st.secrets / env
-    - Soporta opcionalmente OPENAI_BASE_URL / OPENAI_ORG
-    - Errores explicativos (no rompe la app)
-    """
+    from openai import OpenAI
     api_key = (
         st.secrets.get("OPENAI_API_KEY")
         or st.secrets.get("openai_api_key")
         or os.getenv("OPENAI_API_KEY")
     )
     if not api_key:
-        st.error("⚠️ Falta `OPENAI_API_KEY` en Secrets. Ve a Settings → Secrets y agrégalo.")
-        return "⚠️ Configura `OPENAI_API_KEY` para habilitar la IA."
-
-    api_key = str(api_key).strip().strip('"').strip("'")
+        st.error("⚠️ Falta `OPENAI_API_KEY` en Secrets.")
+        return "⚠️ Configura `OPENAI_API_KEY` en Secrets."
 
     org = st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG")
     base_url = st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-
     kwargs = {"api_key": api_key}
-    if org:
-        kwargs["organization"] = str(org).strip()
-    if base_url:
-        kwargs["base_url"] = str(base_url).strip()
+    if org: kwargs["organization"] = org
+    if base_url: kwargs["base_url"] = base_url
 
     try:
         client = OpenAI(**kwargs)
     except Exception as e:
-        st.error(f"⚠️ No se pudo inicializar OpenAI: {e}")
+        st.error(f"No se pudo inicializar OpenAI: {e}")
         return "⚠️ Error inicializando OpenAI."
 
     modo = st.session_state.get("modo_respuesta", "Ejecutivo (breve)")
@@ -48,7 +52,6 @@ def ask_gpt(prompt: str) -> str:
         "Eres un controller financiero experto. Tono: "
         + ("breve, ejecutivo (5–7 frases)" if "Ejecutivo" in modo else "analítico, concreto")
     )
-
     messages = [{"role": "system", "content": system}]
     for h in st.session_state.historial[-8:]:
         messages += [{"role": "user", "content": h["pregunta"]},
@@ -56,110 +59,121 @@ def ask_gpt(prompt: str) -> str:
     messages.append({"role": "user", "content": prompt})
 
     try:
-        resp = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             temperature=0.2
         )
-        return resp.choices[0].message.content
+        return res.choices[0].message.content
     except Exception as e:
-        st.error(f"⚠️ Fallo en la petición a OpenAI: {e}")
+        st.error(f"Fallo en petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
-# ------------------------
-# Estado
-# ------------------------
+
+# --- HELPERS ---
+def _norm(s: str) -> str:
+    s = str(s).replace("\u00A0", " ").strip()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    s = re.sub(r'\s+', ' ', s)
+    return s.lower()
+
+def mostrar_tabla(df, cat_col, val_col, title=None):
+    tabla = df.groupby(cat_col)[val_col].sum().reset_index()
+    tabla[val_col] = tabla[val_col].apply(fmt_pesos)
+    total = df[val_col].sum()
+    st.markdown(f"### {title or (val_col + ' por ' + cat_col)}")
+    st.dataframe(tabla, use_container_width=True)
+    st.markdown(f"**Total {val_col}: {fmt_pesos(total)}**")
+
+def mostrar_grafico_barras(df, cat_col, val_col, title=None):
+    agg = df.groupby(cat_col)[val_col].sum().sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(8,4))
+    agg.plot(kind="bar", ax=ax)
+    ax.set_title(title or f"{val_col} por {cat_col}")
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(lambda x, _: fmt_pesos(x)))
+    plt.xticks(rotation=45, ha="right")
+    st.pyplot(fig)
+
+def mostrar_grafico_torta(df, cat_col, val_col, title=None):
+    agg = df.groupby(cat_col)[val_col].sum()
+    fig, ax = plt.subplots()
+    agg.plot(kind="pie", autopct="%1.1f%%", ax=ax)
+    ax.set_ylabel("")
+    ax.set_title(title or f"{val_col} por {cat_col}")
+    st.pyplot(fig)
+
+# --- UI ---
+st.sidebar.title("⚙️ Configuración")
+modo = st.sidebar.radio("Modo de respuesta IA", ["Ejecutivo (breve)", "Analítico (detallado)"])
+st.session_state["modo_respuesta"] = modo
+
+st.title("🤖 Controller Financiero IA")
+
 if "historial" not in st.session_state:
     st.session_state.historial = []
-if "data" not in st.session_state:
-    st.session_state.data = None
 
-# ------------------------
-# Sidebar
-# ------------------------
-st.sidebar.title("⚙️ Configuración")
-st.sidebar.radio("Modo de respuesta:", ["Ejecutivo (breve)", "Analítico"], key="modo_respuesta")
-
-with st.sidebar.expander("🔎 Diagnóstico OpenAI"):
-    if st.button("Probar conexión OpenAI"):
-        try:
-            api_key = (
-                st.secrets.get("OPENAI_API_KEY")
-                or os.getenv("OPENAI_API_KEY")
-            )
-            client = OpenAI(api_key=str(api_key).strip())
-            models = client.models.list()
-            st.success(f"OK. Modelos disponibles: {len(models.data)}")
-        except Exception as e:
-            st.error(f"No se pudo conectar: {e}")
-
-# ------------------------
-# Cargar datos
-# ------------------------
-st.title("🤖 Fénix Bot Controller IA")
-
-archivo = st.file_uploader("📂 Sube un Excel/CSV", type=["xlsx", "xls", "csv"])
-if archivo:
-    try:
-        if archivo.name.endswith(".csv"):
-            df = pd.read_csv(archivo)
-        else:
-            df = pd.read_excel(archivo, sheet_name=None)  # todas las hojas
-        st.session_state.data = df
-        st.success("✅ Datos cargados correctamente.")
-    except Exception as e:
-        st.error(f"Error al cargar archivo: {e}")
-
-# ------------------------
-# KPIs + Dashboard
-# ------------------------
-if st.session_state.data is not None:
-    st.subheader("📊 KPIs Generales")
-
-    if isinstance(st.session_state.data, dict):
-        df_all = pd.concat(st.session_state.data.values(), ignore_index=True)
+# --- FILE UPLOAD ---
+st.subheader("Carga de datos")
+file = st.file_uploader("Sube archivo Excel/CSV", type=["xlsx","xls","csv"])
+data = {}
+if file:
+    if file.name.endswith("csv"):
+        data["Hoja1"] = pd.read_csv(file)
     else:
-        df_all = st.session_state.data
+        xls = pd.ExcelFile(file)
+        for sheet in xls.sheet_names:
+            data[sheet] = pd.read_excel(file, sheet_name=sheet)
+    st.session_state.data = data
 
-    # Si hay columna de ingresos
-    kpi_cols = [c for c in df_all.columns if "monto" in c.lower() or "ingreso" in c.lower()]
-    if kpi_cols:
-        col = kpi_cols[0]
-        total = df_all[col].sum()
-        st.metric("Ingresos Totales", f"${total:,.0f}")
-        # gráfico simple
-        fig, ax = plt.subplots()
-        df_all[col].plot(kind="hist", bins=20, ax=ax)
-        ax.set_title(f"Distribución de {col}")
-        st.pyplot(fig)
-    else:
-        st.info("No se detectaron columnas de ingresos/montos para mostrar KPIs.")
+if "data" in st.session_state:
+    st.success("✅ Datos cargados")
 
-# ------------------------
-# Consulta IA
-# ------------------------
-st.subheader("💬 Consulta IA")
-pregunta = st.text_input("Escribe tu consulta")
-if st.button("Responder") and pregunta:
-    contenido = ""
-    if isinstance(st.session_state.data, dict):
-        for name, df in st.session_state.data.items():
-            contenido += f"Hoja: {name}\n{df.head(50).to_string(index=False)}\n\n"
-    else:
-        contenido = st.session_state.data.head(50).to_string(index=False)
+    # --- DASHBOARD KPIs ---
+    st.header("📊 Dashboard General")
+    analisis = analizar_datos_taller(st.session_state.data)
 
-    prompt = f"""
-Datos disponibles:\n{contenido}\n
-Pregunta del usuario: {pregunta}
-"""
-    r = ask_gpt(prompt)
-    st.markdown(r)
-    st.session_state.historial.append({"pregunta": pregunta, "respuesta": r})
+    total_ingresos = 0
+    total_costos = 0
+    for hoja, df in st.session_state.data.items():
+        for c in df.columns:
+            if "ingreso" in c.lower() or "neto" in c.lower() or "monto" in c.lower():
+                total_ingresos += df[c].sum()
+            if "costo" in c.lower():
+                total_costos += df[c].sum()
+    margen = total_ingresos - total_costos
+    margen_pct = (margen / total_ingresos * 100) if total_ingresos else 0
 
-# ------------------------
-# Historial
-# ------------------------
-with st.expander("🧠 Historial de la sesión"):
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Ingresos ($)", fmt_pesos(total_ingresos))
+    kpi2.metric("Costos ($)", fmt_pesos(total_costos))
+    kpi3.metric("Margen ($)", fmt_pesos(margen))
+    kpi4.metric("Margen %", f"{margen_pct:.1f}%")
+
+    # --- Vista previa gráfica rápida ---
+    st.subheader("Vistas rápidas")
+    for hoja, df in st.session_state.data.items():
+        if df is not None and not df.empty and df.shape[1] >= 2:
+            cols = list(df.columns)
+            val_col = None
+            for c in cols:
+                if any(k in c.lower() for k in ["monto","neto","total","importe","ingreso"]):
+                    val_col = c; break
+            cat_col = cols[0]
+            if val_col:
+                st.write(f"**{hoja}: {val_col} por {cat_col}**")
+                mostrar_grafico_barras(df, cat_col, val_col)
+
+    # --- Consulta IA ---
+    st.subheader("Consulta IA")
+    pregunta = st.text_input("Haz una pregunta:")
+    if st.button("Responder") and pregunta:
+        schema = {"columnas": {h:list(df.columns) for h,df in st.session_state.data.items()}}
+        respuesta = ask_gpt(f"Pregunta: {pregunta}\nEsquema: {schema}")
+        st.markdown(respuesta)
+        st.session_state.historial.append({"pregunta": pregunta, "respuesta": respuesta})
+
+    # --- Historial ---
+    st.subheader("📜 Historial")
     for h in st.session_state.historial:
-        st.write(f"**Tú:** {h['pregunta']}")
-        st.write(f"**IA:** {h['respuesta']}")
+        st.markdown(f"**Tú:** {h['pregunta']}")
+        st.markdown(f"**Bot:** {h['respuesta']}")
