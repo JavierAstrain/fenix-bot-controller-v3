@@ -56,7 +56,7 @@ if "modo_respuesta" not in st.session_state:   st.session_state.modo_respuesta =
 # CARGA (CACHE)
 # ---------------------------
 @st.cache_data(show_spinner=False, ttl=300)
-def load_excel(file): 
+def load_excel(file):
     return pd.read_excel(file, sheet_name=None)
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -182,7 +182,7 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
             if med > 0 and top_val / med >= 3.0:
                 st.info("Distribución desbalanceada: muestro tabla para mejor lectura.")
                 mostrar_tabla(df, col_categoria, col_valor, titulo); return
-    except Exception: 
+    except Exception:
         pass
     if top_n is None: top_n = st.session_state.get("top_n_grafico", 12)
     recorte = False
@@ -267,7 +267,7 @@ def parse_and_render_instructions(respuesta_texto: str, data_dict: dict, cliente
                 if not ok: st.warning("No se pudo generar la tabla (verifica columnas).")
 
 # ---------------------------
-# PLANNER
+# PLANNER (LLM)
 # ---------------------------
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -456,33 +456,4 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
             fig.autofmt_xdate()
             st.pyplot(fig)
             st.download_button("⬇️ PNG", _export_fig(fig), "kpi_tendencia.png", "image/png")
-    else:
-        with c3: st.info("No se detectaron fechas para tendencia mensual.")
-
-# ---------------------------
-# UI
-# ---------------------------
-col1, col2 = st.columns([1,3])
-
-with col1:
-    st.markdown("### 📁 Datos")
-    fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
-    if fuente == "Excel":
-        file = st.file_uploader("Sube un Excel", type=["xlsx","xls"], key="k_excel")
-        if file: st.session_state.data = load_excel(file)
-    else:
-        with st.form(key="form_gsheet"):
-            url = st.text_input("URL de Google Sheet", value=st.session_state.sheet_url, key="k_url")
-            conectar = st.form_submit_button("Conectar")
-        if conectar and url:
-            try:
-                st.session_state.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
-                st.session_state.sheet_url = url
-                st.success("Google Sheet conectado.")
-            except Exception as e:
-                st.error(f"Error conectando Google Sheet: {e}")
-
-    st.markdown("### ⚙️ Preferencias")
-    st.session_state.modo_respuesta = st.radio("Modo de respuesta", ["Ejecutivo (breve)","Analítico (detallado)"])
-   
-
+    else
