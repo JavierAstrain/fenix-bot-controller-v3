@@ -456,4 +456,124 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
             fig.autofmt_xdate()
             st.pyplot(fig)
             st.download_button("⬇️ PNG", _export_fig(fig), "kpi_tendencia.png", "image/png")
-    else
+    else:
+        with c3: st.info("No se detectaron fechas para tendencia mensual.")
+
+# ---------------------------
+# UI
+# ---------------------------
+col1, col2 = st.columns([1,3])
+
+with col1:
+    st.markdown("### 📁 Datos")
+    fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
+    if fuente == "Excel":
+        file = st.file_uploader("Sube un Excel", type=["xlsx","xls"], key="k_excel")
+        if file: st.session_state.data = load_excel(file)
+    else:
+        with st.form(key="form_gsheet"):
+            url = st.text_input("URL de Google Sheet", value=st.session_state.sheet_url, key="k_url")
+            conectar = st.form_submit_button("Conectar")
+        if conectar and url:
+            try:
+                st.session_state.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
+                st.session_state.sheet_url = url
+                st.success("Google Sheet conectado.")
+            except Exception as e:
+                st.error(f"Error conectando Google Sheet: {e}")
+
+    st.markdown("### ⚙️ Preferencias")
+    st.session_state.modo_respuesta = st.radio("Modo de respuesta", ["Ejecutivo (breve)","Analítico (detallado)"])
+    st.session_state.max_cats_grafico = st.number_input("Máx. categorías para graficar", 6, 200, st.session_state.max_cats_grafico)
+    st.session_state.top_n_grafico = st.number_input("Top‑N por defecto (barras)", 5, 100, st.session_state.top_n_grafico)
+
+data = st.session_state.data
+
+with col2:
+    if data:
+        # Filtro opcional por cliente (genérico)
+        st.markdown("### 🎛️ Filtros")
+        cliente_txt = st.text_input("Cliente contiene…", value="")
+
+        tabs = st.tabs(["📈 KPIs", "📄 Vista previa", "🤖 Consulta IA", "🧠 Historial"])
+
+        with tabs[0]:
+            kpis = analizar_datos_taller(data, cliente_txt)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
+            c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
+            c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
+            c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
+
+            c5, c6, c7 = st.columns(3)
+            c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
+            tp = kpis.get("ticket_promedio")
+            c6.metric("Ticket promedio", f"${int(round(tp)):,}".replace(",", ".") if tp else "—")
+            conv = kpis.get("conversion_pct")
+            c7.metric("Conversión",   f"{conv:.1f}%" if conv is not None else "—")
+            lt = kpis.get("lead_time_mediano_dias")
+            if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
+
+            # Mini-dashboard
+            render_kpi_dashboard(data, cliente_txt)
+
+        with tabs[1]:
+            st.markdown("### 📄 Hojas")
+            for name, df in data.items():
+                dfv = df.copy()
+                if cliente_txt:
+                    cli_col = next((c for c in df.columns if "cliente" in _norm(c)), None)
+                    if cli_col:
+                        dfv = dfv[dfv[cli_col].astype(str).str.contains(cliente_txt, case=False, na=False)]
+                st.markdown(f"#### 📘 {name} • filas: {len(dfv)}")
+                st.dataframe(dfv.head(10))
+
+        with tabs[2]:
+            st.markdown("### 🤖 Consulta")
+            pregunta = st.text_area("Pregunta")
+            c1b, c2b = st.columns(2)
+            if c1b.button("📊 Análisis General Automático"):
+                analisis = analizar_datos_taller(data, cliente_txt)
+                prompt = f"""
+Eres un controller financiero senior.
+Con base en los datos calculados (reales) a continuación, entrega un análisis profesional y accionable.
+Incluye UNA instrucción si ayuda:
+- grafico_torta:cat|val|titulo
+- grafico_barras:cat|val|titulo
+- tabla:cat|val
+No inventes datos.
+
+Datos calculados:
+{json.dumps(analisis, ensure_ascii=False, indent=2)}
+"""
+                r = ask_gpt(prompt); st.markdown(r)
+                st.session_state.historial.append({"pregunta":"Análisis general","respuesta":r})
+                parse_and_render_instructions(r, data, cliente_txt)
+
+            if c2b.button("Responder") and pregunta:
+                schema = _build_schema(data)
+                plan = plan_from_llm(pregunta, schema)
+                executed = False
+                if plan: executed = execute_plan(plan, data, cliente_txt)
+                if not executed:
+                    prompt = f"""
+Responde como controller financiero. Si puedes, incluye UNA instrucción:
+- grafico_torta:cat|val|titulo
+- grafico_barras:cat|val|titulo
+- tabla:cat|val[|titulo]
+Para categorías tipo ID (patente/folio/doc/factura/oc), prefiere tabla.
+Pregunta: {pregunta}
+Esquema: {json.dumps(schema, ensure_ascii=False)}
+"""
+                    r = ask_gpt(prompt); st.markdown(r)
+                    st.session_state.historial.append({"pregunta":pregunta,"respuesta":r})
+                    parse_and_render_instructions(r, data, cliente_txt)
+
+        with tabs[3]:
+            if st.session_state.historial:
+                for i, h in enumerate(st.session_state.historial[-12:], 1):
+                    st.markdown(f"**Q{i}:** {h['pregunta']}")
+                    st.markdown(f"**A{i}:** {h['respuesta']}")
+            else:
+                st.info("Aún no hay historial en esta sesión.")
+
