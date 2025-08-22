@@ -8,6 +8,7 @@ import io
 import json
 import re
 import unicodedata
+import os
 from typing import Dict, Any, Optional
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
@@ -16,22 +17,21 @@ from analizador import analizar_datos_taller
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 # ---------------------------
-# LOGIN
+# LOGIN (opcional; comenta si no lo usas)
 # ---------------------------
 if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+    st.session_state.authenticated = True  # pon False si quieres forzar login
 
 def login():
     st.markdown("## 🔐 Iniciar sesión")
     username = st.text_input("Usuario")
     password = st.text_input("Contraseña", type="password")
     if st.button("Iniciar sesión"):
-        try_user = st.secrets.get("USER", None)
-        try_pass = st.secrets.get("PASSWORD", None)
-        if try_user is None or try_pass is None:
-            st.error("Secrets USER/PASSWORD no configurados.")
+        u = st.secrets.get("USER"); p = st.secrets.get("PASSWORD")
+        if not u or not p:
+            st.error("Configura USER y PASSWORD en Secrets.")
             return
-        if username == try_user and password == try_pass:
+        if username == u and password == p:
             st.session_state.authenticated = True
             st.rerun()
         else:
@@ -69,19 +69,66 @@ def load_gsheet(json_keyfile: str, sheet_url: str):
     return {ws.title: pd.DataFrame(ws.get_all_records()) for ws in sheet.worksheets()}
 
 # ---------------------------
-# OPENAI
+# OPENAI (robusto)
 # ---------------------------
 def ask_gpt(prompt: str) -> str:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    api_key = (
+        st.secrets.get("OPENAI_API_KEY")
+        or st.secrets.get("openai_api_key")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    if not api_key:
+        st.error("⚠️ Falta `OPENAI_API_KEY` en Secrets.")
+        return "⚠️ Configura `OPENAI_API_KEY` en Secrets."
+
+    api_key = str(api_key).strip().strip('"').strip("'")
+    org = st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG")
+    base_url = st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    kwargs = {"api_key": api_key}
+    if org: kwargs["organization"] = str(org).strip()
+    if base_url: kwargs["base_url"] = str(base_url).strip()
+
+    try:
+        client = OpenAI(**kwargs)
+    except Exception as e:
+        st.error(f"No se pudo inicializar OpenAI: {e}")
+        return "⚠️ Error inicializando OpenAI."
+
     modo = st.session_state.get("modo_respuesta", "Ejecutivo (breve)")
-    system = f"Eres un controller financiero experto del Taller Fénix. Tono: {'breve, ejecutivo (5–7 frases)' if 'Ejecutivo' in modo else 'analítico, concreto (hasta 12 frases)'}."
+    system = (
+        "Eres un controller financiero experto. Tono: "
+        + ("breve, ejecutivo (5–7 frases)" if "Ejecutivo" in modo else "analítico, concreto")
+    )
     messages = [{"role": "system", "content": system}]
     for h in st.session_state.historial[-8:]:
-        messages.append({"role": "user", "content": h["pregunta"]})
-        messages.append({"role": "assistant", "content": h["respuesta"]})
+        messages += [{"role": "user", "content": h["pregunta"]},
+                     {"role": "assistant", "content": h["respuesta"]}]
     messages.append({"role": "user", "content": prompt})
-    res = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.2)
-    return res.choices[0].message.content
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.2
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        st.error(f"Fallo en la petición a OpenAI: {e}")
+        return "⚠️ No pude completar la consulta a la IA."
+
+# Diagnóstico rápido
+with st.sidebar.expander("🔎 Diagnóstico OpenAI"):
+    if st.button("Probar conexión OpenAI"):
+        try:
+            api_key = (
+                st.secrets.get("OPENAI_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+            )
+            client = OpenAI(api_key=str(api_key).strip())
+            models = client.models.list()
+            st.success(f"OK. Modelos disponibles: {len(models.data)}")
+        except Exception as e:
+            st.error(f"No se pudo conectar: {e}")
 
 # ---------------------------
 # UTILIDADES (normalización, formato)
@@ -113,8 +160,7 @@ def _fmt_pesos(x, pos=None):
 def _export_fig(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
-    buf.seek(0)
-    return buf.read()
+    buf.seek(0); return buf.read()
 
 # ---------------------------
 # VISUALIZACIONES
@@ -133,16 +179,6 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     st.download_button("⬇️ Descargar tabla (CSV)", resumen.to_csv(index=False).encode("utf-8"),
                        "tabla.csv", "text/csv")
 
-def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
-    vals = pd.to_numeric(df[col_valor], errors="coerce")
-    resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
-                 .sum().sort_values(ascending=False))
-    fig, ax = plt.subplots()
-    ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
-    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    st.pyplot(fig)
-    st.download_button("⬇️ Descargar gráfico (PNG)", _export_fig(fig), "grafico.png", "image/png")
-
 def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
@@ -155,8 +191,7 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
         if np.isfinite(y):
             ax.annotate(_fmt_pesos(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
-    fig.tight_layout(); st.pyplot(fig)
-    st.download_button("⬇️ Descargar gráfico (PNG)", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
@@ -168,14 +203,12 @@ def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
         if np.isfinite(x):
             ax.annotate(_fmt_pesos(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
                         xytext=(5,0), ha='left', va='center', fontsize=8)
-    fig.tight_layout(); st.pyplot(fig)
-    st.download_button("⬇️ Descargar gráfico (PNG)", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
                  .sum().sort_values(ascending=False))
-    # outlier -> tabla
     try:
         if len(resumen) >= 8:
             top_val = float(resumen.iloc[0]); med = float(np.median(resumen.values))
@@ -193,12 +226,20 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
     else:                            _barras_vertical(resumen, col_categoria, col_valor, titulo)
     if recorte: st.caption(f"Mostrando Top‑{top_n}. Usa tabla para el detalle completo.")
 
+def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
+    vals = pd.to_numeric(df[col_valor], errors="coerce")
+    resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
+                 .sum().sort_values(ascending=False))
+    fig, ax = plt.subplots()
+    ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
+    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
+    st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+
 # ---------------------------
 # AUTO-CHOOSER
 # ---------------------------
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     cat_norm = _norm(cat_col)
-    # IDs -> tabla
     id_hints = ["patente","folio","nro","numero","número","doc","documento","factura","boleta","oc","orden","presupuesto","cotizacion","cotización"]
     if any(h in cat_norm for h in id_hints): return "table"
     nunique = df[cat_col].nunique(dropna=False)
@@ -363,7 +404,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any], cliente_txt: str) -
     return False
 
 # ---------------------------
-# DASHBOARD KPIs (nuevo)
+# DASHBOARD KPIs (genérico)
 # ---------------------------
 def _first_col_with(df: pd.DataFrame, keys):
     for c in df.columns:
@@ -372,19 +413,16 @@ def _first_col_with(df: pd.DataFrame, keys):
     return None
 
 def _apply_client_filter_df(df: pd.DataFrame, client_txt: str) -> pd.DataFrame:
-    if not client_txt:
-        return df
+    if not client_txt: return df
     cli = _first_col_with(df, ["cliente"])
-    if not cli:
-        return df
+    if not cli: return df
     out = df.copy()
     return out[out[cli].astype(str).str.contains(client_txt, case=False, na=False)]
 
 def _ing_col(df: pd.DataFrame):
     for k in ["monto", "neto", "total", "importe", "facturacion", "ingreso", "venta", "principal"]:
         c = _first_col_with(df, [k])
-        if c is not None:
-            return c
+        if c is not None: return c
     return None
 
 def _date_col(df: pd.DataFrame):
@@ -435,7 +473,7 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
     if not plotted2:
         with c2: st.info("No se encontró columna de estado para distribución.")
 
-    # 3) Tendencia mensual de ingresos (suma multi-hoja)
+    # 3) Tendencia mensual (multi-hoja)
     ser_total = None
     for hoja, df in data.items():
         val = _ing_col(df); fec = _date_col(df)
@@ -462,13 +500,15 @@ def render_kpi_dashboard(data: dict, cliente_txt: str):
 # ---------------------------
 # UI
 # ---------------------------
+st.title("🤖 Controller Financiero IA")
+
 col1, col2 = st.columns([1,3])
 
 with col1:
     st.markdown("### 📁 Datos")
     fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
     if fuente == "Excel":
-        file = st.file_uploader("Sube un Excel", type=["xlsx","xls"], key="k_excel")
+        file = st.file_uploader("Sube un Excel", type=["xlsx","xls"])
         if file: st.session_state.data = load_excel(file)
     else:
         with st.form(key="form_gsheet"):
@@ -491,7 +531,6 @@ data = st.session_state.data
 
 with col2:
     if data:
-        # Filtro opcional por cliente (genérico)
         st.markdown("### 🎛️ Filtros")
         cliente_txt = st.text_input("Cliente contiene…", value="")
 
@@ -504,7 +543,6 @@ with col2:
             c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
             c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
             c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
-
             c5, c6, c7 = st.columns(3)
             c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
             tp = kpis.get("ticket_promedio")
@@ -513,8 +551,6 @@ with col2:
             c7.metric("Conversión",   f"{conv:.1f}%" if conv is not None else "—")
             lt = kpis.get("lead_time_mediano_dias")
             if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
-
-            # Mini-dashboard
             render_kpi_dashboard(data, cliente_txt)
 
         with tabs[1]:
