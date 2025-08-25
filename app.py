@@ -273,34 +273,36 @@ LIST_COMMA_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
     re.I
 )
-MILLONES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*millone?s\b')
-MILES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*mil\b')
+MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')      # optional $
+MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')            # optional $
 
-def _fmt_pesos_str(x: int) -> str:
-    try:
-        return _fmt_pesos(int(x))
-    except Exception:
-        return str(x)
+LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 
 def prettify_answer(text: str) -> str:
-    """Limpia estilos raros, normaliza bullets, pone $ y puntos a miles,
-       convierte 'X millones/mil' a CLP y formatea listas de montos."""
+    """Limpia estilos/HTML, corrige espacios pegados, normaliza CLP y listas de montos."""
     if not text: return text
     t = text
 
-    # 0) limpiar backticks/cursivas y forzar saltos en bullets
-    t = t.replace("\u00A0", " ")
-    t = t.replace("•", "\n- ")                      # bullets en línea -> saltos de línea
+    # 0) limpiar HTML y marcas de estilo inline
+    t = re.sub(r'<[^>]+>', '', t)                          # quita tags HTML (em/i/strong etc.)
+    t = t.replace("\u00A0", " ")                           # NBSP -> espacio
+    t = t.replace("•", "\n- ")                             # bullets en nueva línea
     t = re.sub(r'([*_`]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas/código inline
 
-    # 1) espacio entre dígitos y letras pegadas
-    t = re.sub(r'(?<=\d)(?=[A-Za-zÁÉÍÓÚáéíóúñÑ])', ' ', t)
-    t = re.sub(r'(?<=[A-Za-zÁÉÍÓÚáéíóúñÑ])(?=\d)', ' ', t)
+    # 1) arregla palabras pegadas dígitos/letras
+    t = re.sub(rf'(?<=\d)(?=[{LETTER}])', ' ', t)
+    t = re.sub(rf'(?<=[{LETTER}])(?=\d)', ' ', t)
+
+    # 1.b) heurística: inserta espacios alrededor de preposiciones/artículos pegados
+    stopwords = ["con","de","del","la","los","en","el","un","una","y","e","por","para","al","del"]
+    for _ in range(2):  # dos pasadas suelen bastar
+        for w in stopwords:
+            t = re.sub(rf'(?i)(?<=\w){w}(?=\w)', f' {w} ', t)
 
     # 2) normaliza inicio de bullet
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
 
-    # 3) "X millones" y "X mil" -> CLP
+    # 3) "X millones" y "X mil" -> CLP (sin duplicar $)
     def _mill_to_clp(m):
         raw = m.group(1).replace(",", ".")
         try:
@@ -319,7 +321,7 @@ def prettify_answer(text: str) -> str:
             return m.group(0)
     t = MILES_RE.sub(_mil_to_clp, t)
 
-    # 4) Series de cantidades con comas o "y/e": conviértelas a $ y sepáralas con "–"
+    # 4) Series con comas o "y/e": -> $ y "–"
     def _series_to_clp(m):
         series = m.group(1)
         nums = re.findall(r'\d{1,3}(?:,\d{3})+', series)
@@ -333,14 +335,24 @@ def prettify_answer(text: str) -> str:
         return _fmt_pesos(n)
     t = CURRENCY_COMMA_RE.sub(_to_clp, t)
 
-    # 6) Listas de $ separadas por coma o "y/e" -> guion largo
-    # aplicar hasta que no queden más coincidencias
+    # 6) Evita doble $
+    t = re.sub(r'\$\s*\$', '$', t)
+
+    # 7) Separador guion largo entre $x y $y
     while True:
         t_new, n1 = re.subn(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)
         t_new, n2 = re.subn(r'(\$\d[\d\.]*)\s+(?:y|e)\s+(?=\$\d)', r'\1 – ', t_new, flags=re.I)
         t = t_new
         if n1 + n2 == 0:
             break
+
+    # 8) espacios tras puntuación
+    t = re.sub(r':(?=\S)', ': ', t)
+    t = re.sub(r',(?=\S)', ', ', t)
+
+    # 9) colapsa espacios, preservando saltos de línea
+    t = re.sub(r'[ \t]+', ' ', t)
+    t = re.sub(r'\n\s+', '\n', t)
 
     return t.strip()
 
@@ -776,5 +788,4 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
-
 
