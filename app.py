@@ -19,7 +19,7 @@ from analizador import analizar_datos_taller
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
-# Tipografía/tamaño uniformes y desactivar cursivas
+# Tipografía/tamaño uniformes + neutralización de cursivas/monospace
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"] {
@@ -34,13 +34,13 @@ html, body, [data-testid="stMarkdownContainer"] {
   letter-spacing: .2px;
 }
 /* Evita cursivas aunque el markdown incluya *...* o _..._ */
-[data-testid="stMarkdownContainer"] em, 
-[data-testid="stMarkdownContainer"] i { 
-  font-style: normal !important; 
+[data-testid="stMarkdownContainer"] em,
+[data-testid="stMarkdownContainer"] i {
+  font-style: normal !important;
 }
-/* Evita monospace accidental en `code` */
-[data-testid="stMarkdownContainer"] code { 
-  font-family: inherit !important; 
+/* Evita monospace y fondos raros en `code` accidental */
+[data-testid="stMarkdownContainer"] code {
+  font-family: inherit !important;
   background: transparent !important;
 }
 </style>
@@ -100,20 +100,21 @@ def _get_openai_client():
 
 def ask_gpt(messages) -> str:
     client = _get_openai_client()
-    if client is None: return "⚠️ Error inicializando OpenAI."
+    if client is None:
+        return "⚠️ Error inicializando OpenAI."
     try:
         resp = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             temperature=0.15
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or ""
     except Exception as e:
         st.error(f"Fallo en la petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
 def diagnosticar_openai():
-    """Diagnóstico de credenciales/cuota."""
+    """Diagnóstico simple de credenciales/cuota."""
     res = {
         "api_key_present": False,
         "organization_set": False,
@@ -145,33 +146,24 @@ def diagnosticar_openai():
         _ = client.models.list()
         res["list_models_ok"] = True
     except Exception as e:
-        msg = str(e).lower()
         res["error"] = f"Error listando modelos: {e}"
-        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
-            res["quota_ok"] = False
         return res
 
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Ping de diagnóstico. Responde: OK."}],
+            messages=[{"role": "user", "content": "Ping diagnóstico. Responde: OK."}],
             temperature=0,
             max_tokens=5
         )
         res["chat_ok"] = True
-        try:
-            if hasattr(r, "usage") and r.usage and r.usage.total_tokens is not None:
-                res["usage_tokens"] = int(r.usage.total_tokens)
-        except Exception:
-            pass
-        if res["quota_ok"] is None: res["quota_ok"] = True
+        if getattr(r, "usage", None) and getattr(r.usage, "total_tokens", None) is not None:
+            res["usage_tokens"] = int(r.usage.total_tokens)
+        if res["quota_ok"] is None:
+            res["quota_ok"] = True
     except Exception as e:
-        msg = str(e).lower()
         res["error"] = f"Error en prueba de chat: {e}"
-        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
-            res["quota_ok"] = False
-        else:
-            res["quota_ok"] = None
+        res["quota_ok"] = None
     return res
 
 # ---------------------------
@@ -204,7 +196,8 @@ def _fmt_pesos(x, pos=None):
 def _export_fig(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
-    buf.seek(0); return buf.read()
+    buf.seek(0)
+    return buf.read()
 
 # ---------------------------
 # VISUALIZACIONES
@@ -227,7 +220,8 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_ylabel(col_valor); ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_ylabel(col_valor)
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
     ax.tick_params(axis='x', rotation=45)
     for lbl in ax.get_xticklabels(): lbl.set_ha('right')
     for b in bars:
@@ -235,19 +229,24 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
         if np.isfinite(y):
             ax.annotate(_fmt_pesos(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
-    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout()
+    st.pyplot(fig)
+    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
     bars = ax.barh(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_xlabel(col_valor); ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_xlabel(col_valor)
+    ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
     for b in bars:
         x = b.get_width()
         if np.isfinite(x):
             ax.annotate(_fmt_pesos(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
                         xytext=(5,0), ha='left', va='center', fontsize=8)
-    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout()
+    st.pyplot(fig)
+    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -255,20 +254,26 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
                  .sum().sort_values(ascending=False))
     try:
         if len(resumen) >= 8:
-            top_val = float(resumen.iloc[0]); med = float(np.median(resumen.values))
+            top_val = float(resumen.iloc[0])
+            med = float(np.median(resumen.values))
             if med > 0 and top_val / med >= 3.0:
                 st.info("Distribución desbalanceada: muestro tabla para mejor lectura.")
-                mostrar_tabla(df, col_categoria, col_valor, titulo); return
+                mostrar_tabla(df, col_categoria, col_valor, titulo)
+                return
     except Exception:
         pass
     if top_n is None: top_n = st.session_state.get("top_n_grafico", 12)
     recorte = False
     if len(resumen) > top_n:
-        resumen = resumen.head(top_n); recorte = True
+        resumen = resumen.head(top_n)
+        recorte = True
     labels = resumen.index.astype(str)
-    if labels.str.len().mean() > 10: _barras_horizontal(resumen, col_categoria, col_valor, titulo)
-    else:                            _barras_vertical(resumen, col_categoria, col_valor, titulo)
-    if recorte: st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
+    if labels.str.len().mean() > 10:
+        _barras_horizontal(resumen, col_categoria, col_valor, titulo)
+    else:
+        _barras_vertical(resumen, col_categoria, col_valor, titulo)
+    if recorte:
+        st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
 
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -276,8 +281,10 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
                  .sum().sort_values(ascending=False))
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
-    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    ax.axis('equal')
+    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
+    st.pyplot(fig)
+    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     cat_norm = _norm(cat_col)
@@ -297,11 +304,11 @@ ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\
 # --- Normalización de texto y montos en respuestas IA ---
 LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 
-# cantidades 1,234,567  y  1.234.567
+# Números con separadores (coma o punto)
 CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
 CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 
-# series de cantidades separadas por coma/punto y/o "y/e/–/-"
+# Series: 751.084, 1.845.835 y 2.321.659  /  751,084, 1,845,835 y 2,321,659
 LIST_COMMA_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
     re.I
@@ -311,88 +318,92 @@ LIST_DOT_SERIES_RE = re.compile(
     re.I
 )
 
-# "X millones" / "X mil" (con o sin $)
+# "X millones" / "X mil"
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 
-# Conectores para despegar palabras
-STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que|mientras|entre|sobre|hasta|desde"
-GLUE_RE = re.compile(rf'([{LETTER}]{{2,}})({STOP})([{LETTER}]{{2,}})', re.I)
-CAMEL_RE = re.compile(r'([a-záéíóúñ]{2,})([A-ZÁÉÍÓÚÑ])')  # antes de mayúscula pegada
+# Conectores para "despegar" palabras pegadas
+CONNECTORS = ["con","de","del","la","las","el","los","un","una","unos","unas",
+              "y","e","por","para","al","en","que","mientras","entre","sobre",
+              "hasta","desde"]
 
-INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')  # ZWSP, ZWNJ, ZWJ, BOM, WORD JOINER, soft hyphen
+# Invisibles y espacios exóticos (NBSP, hair space, narrow NBSP, etc.)
+ALL_SPACES_RE    = re.compile(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]')
+INVISIBLES_RE    = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')
+TITLE_LINE_RE    = re.compile(r'^(#{1,6}\s+[^\n]+)$', re.M)
+
+def _to_clp_from_int(i: int) -> str:
+    return f"${i:,}".replace(",", ".")
 
 def prettify_answer(text: str) -> str:
-    """Limpia estilos/HTML, corrige pegados y normaliza montos (CLP)."""
+    """Limpia Unicode/HTML/Markdown, corrige pegados y normaliza montos (CLP)."""
     if not text:
         return text
+
     t = text
 
-    # 0) limpiar HTML/estilos/char invisibles y bullets
+    # (0) NFKC: convierte caracteres estilizados (𝑨, 𝘧, …) a ASCII normal
+    t = unicodedata.normalize("NFKC", t)
+
+    # (1) Tags HTML + invisibles + espacios exóticos
+    t = re.sub(r'<[^>]+>', '', t)
     t = INVISIBLES_RE.sub('', t)
-    t = re.sub(r'<[^>]+>', '', t)                       # tags HTML
-    t = t.replace("\u00A0", " ")                        # NBSP
-    t = t.replace("•", "\n- ")                          # bullets
-    t = t.replace("*", "").replace("_", "").replace("`", "")  # quita énfasis markdown
+    t = ALL_SPACES_RE.sub(' ', t)         # todos a espacio normal
+    t = t.replace("•", "\n- ")            # bullets consistentes
     t = t.replace("“","\"").replace("”","\"").replace("’","'")
 
-    # 1) separar dígitos/letras
-    t = re.sub(rf'(?<=\d)(?=[{LETTER}])', ' ', t)
-    t = re.sub(rf'(?<=[{LETTER}])(?=\d)', ' ', t)
+    # (2) Neutralizar Markdown de énfasis/código
+    t = re.sub(r'([*_`~]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)
 
-    # 2) despegar conectores y mayúsculas pegadas (loop hasta estabilizar)
-    prev = None
-    while prev != t:
-        prev = t
-        t = GLUE_RE.sub(r'\1 \2 \3', t)
-        t = CAMEL_RE.sub(r'\1 \2', t)
+    # (3) Insertar espacios en conectores pegados y antes de MAYÚSCULA pegada
+    for w in CONNECTORS:
+        t = re.sub(rf'(?i)(?<=[{LETTER}]){w}(?=[{LETTER}])', f' {w} ', t)
+    t = re.sub(r'([a-záéíóúñ]{2,})([A-ZÁÉÍÓÚÑ])', r'\1 \2', t)
 
-    # 3) normaliza inicio de bullet y espacios
+    # (4) Arreglos básicos de espacios
+    t = TITLE_LINE_RE.sub(r'\1\n', t)     # salto tras títulos
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
     t = re.sub(r'[ \t]+', ' ', t)
     t = re.sub(r'\n\s+', '\n', t)
 
-    # 4) "X millones" y "X mil" -> CLP
+    # (5) Normalizar prefijos monetarios antes de tocar montos (acepta espacio)
+    t = re.sub(r'(?i)(?:US|CLP|COP|S)\s*\$', '$', t)
+
+    # (6) "X millones/mil" → CLP
     def _mill_to_clp(m):
         raw = m.group(1).replace(",", ".")
-        try:
-            val = float(raw) * 1_000_000
-            return f"${int(round(val)):,}".replace(",", ".")
-        except Exception:
-            return m.group(0)
+        try:  return _to_clp_from_int(int(round(float(raw) * 1_000_000)))
+        except: return m.group(0)
     t = MILLONES_RE.sub(_mill_to_clp, t)
 
     def _mil_to_clp(m):
         raw = m.group(1).replace(",", ".")
-        try:
-            val = float(raw) * 1_000
-            return f"${int(round(val)):,}".replace(",", ".")
-        except Exception:
-            return m.group(0)
+        try:  return _to_clp_from_int(int(round(float(raw) * 1_000)))
+        except: return m.group(0)
     t = MILES_RE.sub(_mil_to_clp, t)
 
-    # 5) series de cantidades -> $ y "–"
-    def _series_to_clp_comma(m):
-        nums = re.findall(r'\d{1,3}(?:,\d{3})+', m.group(1))
-        clp = [f"${int(n.replace(',', '')):,}".replace(",", ".") for n in nums]
-        return " – ".join(clp)
-    t = LIST_COMMA_SERIES_RE.sub(_series_to_clp_comma, t)
+    # (7) Series → "$a – $b – $c"
+    def _series_to_clp(nums, sep_is_dot=False):
+        out = []
+        for n in nums:
+            n_int = int(n.replace(',' if not sep_is_dot else '.', ''))
+            out.append(_to_clp_from_int(n_int))
+        return " – ".join(out)
 
-    def _series_to_clp_dot(m):
-        nums = re.findall(r'\d{1,3}(?:\.\d{3})+', m.group(1))
-        clp = [f"${int(n.replace('.', '')):,}".replace(",", ".") for n in nums]
-        return " – ".join(clp)
-    t = LIST_DOT_SERIES_RE.sub(_series_to_clp_dot, t)
+    t = LIST_COMMA_SERIES_RE.sub(lambda m: _series_to_clp(re.findall(r'\d{1,3}(?:,\d{3})+', m.group(1)), False), t)
+    t = LIST_DOT_SERIES_RE.sub(  lambda m: _series_to_clp(re.findall(r'\d{1,3}(?:\.\d{3})+', m.group(1)), True),  t)
 
-    # 6) cantidades sueltas con separador -> CLP
-    t = CURRENCY_COMMA_RE.sub(lambda m: f"${int(m.group(1).replace(',', '')):,}".replace(",", "."), t)
-    t = CURRENCY_DOT_RE.sub(  lambda m: f"${int(m.group(1).replace('.', '')):,}".replace(",", "."), t)
+    # (8) Cantidades sueltas con separador → CLP
+    t = CURRENCY_COMMA_RE.sub(lambda m: _to_clp_from_int(int(m.group(1).replace(',', ''))), t)
+    t = CURRENCY_DOT_RE.sub(  lambda m: _to_clp_from_int(int(m.group(1).replace('.', ''))), t)
 
-    # 7) normalizar prefijos y doble $
-    t = re.sub(r'(?:US|CLP|S|COP)\$', '$', t, flags=re.I)  # US$, CLP$, S$, COP$ -> $
-    t = re.sub(r'\${2,}', '$', t)                          # $$ -> $
+    # (9) Colapsar "$ $" o "$$" → "$"
+    t = re.sub(r'\$\s*\$+', '$', t)
 
-    # 8) espacios tras puntuación
+    # (10) Quitar espacio entre $ y número: "$ 1.234" → "$1.234"
+    t = re.sub(r'\$\s+(?=\d)', '$', t)
+
+    # (11) Espacios tras puntuación
     t = re.sub(r':(?=\S)', ': ', t)
     t = re.sub(r',(?=\S)', ', ', t)
 
@@ -420,7 +431,8 @@ def split_text_and_viz(respuesta_texto: str):
 def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo):
     cat = find_col(df, cat_raw); val = find_col(df, val_raw)
     if not cat or not val:
-        st.warning(f"❗ No se pudo generar en '{hoja}'. Revisar columnas: '{cat_raw}' y '{val_raw}'."); return
+        st.warning(f"❗ No se pudo generar en '{hoja}'. Revisar columnas: '{cat_raw}' y '{val_raw}'.")
+        return
     try:
         plot_fn(df, cat, val, titulo)
         st.session_state.aliases[_norm(cat_raw)] = cat
@@ -449,11 +461,11 @@ def render_viz_instructions(instr_list, data_dict):
                 cat_raw, val_raw, title = parts
                 if hoja_sel and hoja_sel in data_dict:
                     _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                              hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title); return True
+                               hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title); return True
                 for hoja, df in data_dict.items():
                     if find_col(df, cat_raw) and find_col(df, val_raw):
                         _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
-                                  hoja, df, cat_raw, val_raw, title); return True
+                                   hoja, df, cat_raw, val_raw, title); return True
             else:
                 if len(parts) not in (2,3): continue
                 cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
@@ -463,7 +475,7 @@ def render_viz_instructions(instr_list, data_dict):
     return False
 
 # ---------------------------
-# SCHEMA + PLANNER (fallback de viz)
+# SCHEMA + PLANNER
 # ---------------------------
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -504,7 +516,8 @@ PREGUNTA:
     m = re.search(r"\{.*\}", raw, flags=re.S)
     if not m: return {}
     try:
-        plan = json.loads(m.group(0)); return plan if isinstance(plan, dict) else {}
+        plan = json.loads(m.group(0))
+        return plan if isinstance(plan, dict) else {}
     except Exception:
         return {}
 
@@ -544,17 +557,21 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
             st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":"tabla"}
             return True
 
-        if chart == "barras":   mostrar_grafico_barras(df_fil, cat_real, val_real, title)
-        elif chart == "torta":  mostrar_grafico_torta(df_fil, cat_real, val_real, title)
-        elif chart == "linea":  mostrar_grafico_barras(df_fil, cat_real, val_real, title)  # fallback
-        else:                   mostrar_grafico_barras(df_fil, cat_real, val_real, title)
+        if chart == "barras":
+            mostrar_grafico_barras(df_fil, cat_real, val_real, title)
+        elif chart == "torta":
+            mostrar_grafico_torta(df_fil, cat_real, val_real, title)
+        elif chart == "linea":
+            mostrar_grafico_barras(df_fil, cat_real, val_real, title)  # fallback
+        else:
+            mostrar_grafico_barras(df_fil, cat_real, val_real, title)
 
         st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":f"chart:{chart}"}
         return True
     return False
 
 # ---------------------------
-# IA – PROMPTS ESTRICTOS
+# IA – PROMPTS
 # ---------------------------
 def make_system_prompt():
     return (
@@ -686,7 +703,7 @@ elif st.session_state.menu_sel == "KPIs":
         c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
         c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
         c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
-        c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
+        c4.metric("Margen %",     f"{(kpis.get('margen_pct') or 0):.1f}%")
         c5, c6, c7 = st.columns(3)
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
@@ -735,7 +752,7 @@ elif st.session_state.menu_sel == "KPIs":
         if not plotted2:
             with c2d: st.info("No se encontró columna de estado para distribución.")
 
-        # Tendencia mensual
+        # Tendencia mensual (agrega entre hojas)
         ser_total = None
         for hoja, df in data.items():
             val = next((c for c in df.columns if any(k in _norm(c) for k in ["monto","neto","total","importe","facturacion","ingreso","venta","principal"])), None)
@@ -758,7 +775,7 @@ elif st.session_state.menu_sel == "KPIs":
         else:
             with c3d: st.info("No se detectaron fechas para tendencia mensual.")
 
-# ----------- Consulta IA (texto + visual)
+# ----------- Consulta IA (texto a la izquierda, visual a la derecha) -----------
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
@@ -809,7 +826,7 @@ elif st.session_state.menu_sel == "Historial":
     else:
         st.info("Aún no hay historial en esta sesión.")
 
-# ----------- Diagnóstico IA -----------
+# ----------- Diagnóstico IA (solo API) -----------
 elif st.session_state.menu_sel == "Diagnóstico IA":
     st.markdown("### 🔎 Diagnóstico de la IA (OpenAI)")
     st.caption("Verifica API Key, conexión, prueba mínima de chat y estado de créditos/cuota.")
@@ -830,3 +847,4 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
