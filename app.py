@@ -13,7 +13,7 @@ from html import escape
 from typing import Dict, Any, List, Optional
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
-from streamlit.components.v1 import html as st_html  # <- iframe HTML blindado
+from streamlit.components.v1 import html as st_html
 from analizador import analizar_datos_taller
 
 # ---------------------------
@@ -21,7 +21,7 @@ from analizador import analizar_datos_taller
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
-# Tipografía/tamaño uniformes + neutralización de cursivas/monospace
+# Tipografía/tamaño uniformes (para el resto de la app)
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"] {
@@ -228,17 +228,26 @@ def prettify_answer(text: str) -> str:
     t = re.sub(r',(?=\S)', ', ', t)
     return t.strip()
 
-# ---- Neutralización LaTeX + Render HTML plano (sin Markdown / sin KaTeX) ----
+# ---- Neutralización LaTeX + $ -> &#36; y HTML plano ----
 def sanitize_text_for_html(s: str) -> str:
-    """Normaliza unicode, elimina invisibles y neutraliza delimitadores LaTeX."""
+    """
+    Normaliza unicode, elimina invisibles, neutraliza delimitadores LaTeX
+    y convierte cualquier '$' remanente en '&#36;' para impedir KaTeX.
+    """
     if not s: return ""
     t = unicodedata.normalize("NFKC", s)
+    # Invisibles y NBSP → espacio
     t = re.sub(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]', '', t)
     t = re.sub(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]', ' ', t)
-    # Quita delimitadores LaTeX, dejando el texto literal
-    t = re.sub(r'\\\((.*?)\\\)', r'\1', t, flags=re.S)
-    t = re.sub(r'\\\[(.*?)\\\]', r'\1', t, flags=re.S)
-    t = re.sub(r'\$\$(.*?)\$\$', r'\1', t, flags=re.S)
+    # Neutraliza LaTeX (dejando texto literal)
+    t = re.sub(r'\\\((.*?)\\\)', r'\1', t, flags=re.S)   # \( … \)
+    t = re.sub(r'\\\[(.*?)\\\]', r'\1', t, flags=re.S)   # \[ … \]
+    t = re.sub(r'\$\$(.*?)\$\$', r'\1', t, flags=re.S)   # $$ … $$
+    # Colapsa dobles $
+    t = re.sub(r'\$\s*\$+', '$', t)
+    # MATA KaTeX: todos los $ → entidad HTML (visualmente sigue siendo $)
+    t = t.replace('$', '&#36;')
+    # Bullets y espacios
     t = t.replace("•", "\n- ")
     t = re.sub(r'[ \t]+', ' ', t)
     t = re.sub(r'\n\s+', '\n', t)
@@ -247,7 +256,7 @@ def sanitize_text_for_html(s: str) -> str:
 def md_to_safe_html(markdown_text: str) -> str:
     """
     Convierte nuestro 'markdown simple' (### y '- ') a HTML plano y escapado.
-    Pasa por prettify (moneda + limpieza) y luego sanitize (LaTeX), luego escapa.
+    Pasa por prettify (moneda/series) y sanitize (LaTeX + $→&#36;), luego escapa.
     """
     base = prettify_answer(markdown_text or "")
     t = sanitize_text_for_html(base)
@@ -279,29 +288,23 @@ def _render_sections_html(sections: List[tuple[str, List[str]]]) -> None:
     if html_blocks:
         st.markdown("\n".join(html_blocks), unsafe_allow_html=True)
 
-# Render en iframe (blindado, sin KaTeX ni Markdown de Streamlit)
 def render_ia_html_block(text: str, height: int = 560):
     """
     Renderiza la respuesta de IA en un iframe HTML (sin Markdown/KaTeX).
     Usa nuestros normalizadores y luego pinta HTML plano.
     """
     safe_html = md_to_safe_html(text or "")
-    page = f"""
-    <!doctype html><html><head><meta charset="utf-8">
+    page = f"""<!doctype html><html><head><meta charset="utf-8">
     <style>
-      :root {{
-        --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
-                 "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
-      }}
+      :root {{ --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
+                 "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif; }}
       html,body {{ margin:0; padding:0; font: 15.5px/1.55 var(--font); }}
-      h3 {{ margin: 0 0 .5rem; font-weight: 700; }}
-      ul {{ margin: .25rem 0 .75rem 1.25rem; padding-left: 1rem; }}
-      li, p {{ margin: .25rem 0; font-style: normal; letter-spacing: .2px; white-space: normal; }}
+      h3 {{ margin:0 0 .5rem; font-weight:700; }}
+      ul {{ margin:.25rem 0 .75rem 1.25rem; padding-left:1rem; }}
+      li,p {{ margin:.25rem 0; font-style:normal; letter-spacing:.2px; white-space:normal; }}
       em,i {{ font-style: normal !important; }}
       code {{ font-family: inherit !important; background: transparent !important; }}
-    </style></head>
-    <body>{safe_html}</body></html>
-    """.strip()
+    </style></head><body>{safe_html}</body></html>"""
     st_html(page, height=height, scrolling=True)
 
 # ---------------------------
@@ -416,7 +419,7 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
     ax.axis('equal')
-    ax.set_title(titulo o r f"{col_valor} por {col_categoria}")
+    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     st.pyplot(fig)
     st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
@@ -773,7 +776,6 @@ elif st.session_state.menu_sel == "Historial":
         for i, h in enumerate(st.session_state.historial[-20:], 1):
             st.markdown(f"**Q{i}:** {h['pregunta']}")
             st.markdown(f"**A{i}:**")
-            # JSON → st.json; texto → iframe HTML blindado
             try:
                 parsed = json.loads(h["respuesta"])
                 st.json(parsed)
@@ -803,3 +805,4 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
