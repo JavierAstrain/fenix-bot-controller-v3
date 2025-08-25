@@ -19,7 +19,7 @@ from analizador import analizar_datos_taller
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
-# Tipografía y tamaños uniformes en todo el Markdown
+# Tipografía/tamaño uniformes y desactivar cursivas
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"] {
@@ -32,6 +32,16 @@ html, body, [data-testid="stMarkdownContainer"] {
 [data-testid="stMarkdownContainer"] h3 {
   font-weight: 700 !important;
   letter-spacing: .2px;
+}
+/* Evita cursivas aunque el markdown incluya *...* o _..._ */
+[data-testid="stMarkdownContainer"] em, 
+[data-testid="stMarkdownContainer"] i { 
+  font-style: normal !important; 
+}
+/* Evita monospace accidental en `code` */
+[data-testid="stMarkdownContainer"] code { 
+  font-family: inherit !important; 
+  background: transparent !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -266,7 +276,7 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
                  .sum().sort_values(ascending=False))
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
-    ax.axis('equal'); ax.set_title(titulo o r f"{col_valor} por {col_categoria}")
+    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
@@ -285,20 +295,17 @@ VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
 # --- Normalización de texto y montos en respuestas IA ---
-
 LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 
-# 1,234,567  -> a CLP
+# cantidades 1,234,567  y  1.234.567
 CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
-# 1.234.567  -> a CLP
 CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 
-# series "751,084, 1,845,835 y 2,321,659"
+# series de cantidades separadas por coma/punto y/o "y/e/–/-"
 LIST_COMMA_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
     re.I
 )
-# series "751.084, 1.845.835 y 2.321.659"
 LIST_DOT_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:\.\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:\.\d{3})+))+)(?![\d$])',
     re.I
@@ -308,40 +315,44 @@ LIST_DOT_SERIES_RE = re.compile(
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 
-# Split solo para minúsculas (evita romper FINANZAS)
-STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que|mientras"
-GLUE_RE_LOWER = re.compile(r'([a-záéíóúñ]{2,})(' + STOP + r')([a-záéíóúñ]{2,})', re.I)
+# Conectores para despegar palabras
+STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que|mientras|entre|sobre|hasta|desde"
+GLUE_RE = re.compile(rf'([{LETTER}]{{2,}})({STOP})([{LETTER}]{{2,}})', re.I)
+CAMEL_RE = re.compile(r'([a-záéíóúñ]{2,})([A-ZÁÉÍÓÚÑ])')  # antes de mayúscula pegada
+
+INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')  # ZWSP, ZWNJ, ZWJ, BOM, WORD JOINER, soft hyphen
 
 def prettify_answer(text: str) -> str:
-    """Limpia estilos, arregla espacios y normaliza montos (CLP)."""
+    """Limpia estilos/HTML, corrige pegados y normaliza montos (CLP)."""
     if not text:
         return text
     t = text
 
-    # 0) limpiar HTML/estilos y bullets
-    t = re.sub(r'<[^>]+>', '', t)
-    t = t.replace("\u00A0", " ")
-    t = t.replace("•", "\n- ")
-    # quitar todos los _ y * sueltos que activan markdown
-    t = t.replace("_", "").replace("*", "").replace("`", "")
+    # 0) limpiar HTML/estilos/char invisibles y bullets
+    t = INVISIBLES_RE.sub('', t)
+    t = re.sub(r'<[^>]+>', '', t)                       # tags HTML
+    t = t.replace("\u00A0", " ")                        # NBSP
+    t = t.replace("•", "\n- ")                          # bullets
+    t = t.replace("*", "").replace("_", "").replace("`", "")  # quita énfasis markdown
     t = t.replace("“","\"").replace("”","\"").replace("’","'")
-    # aseguramos saltos tras títulos markdown largos en una sola línea
-    t = re.sub(r'^(#{1,6}\s+[^\n]+)$', r'\1\n', t, flags=re.M)
 
-    # 1) separar dígitos/letras y "despegar" en minúsculas (loop hasta estabilizar)
+    # 1) separar dígitos/letras
     t = re.sub(rf'(?<=\d)(?=[{LETTER}])', ' ', t)
     t = re.sub(rf'(?<=[{LETTER}])(?=\d)', ' ', t)
+
+    # 2) despegar conectores y mayúsculas pegadas (loop hasta estabilizar)
     prev = None
     while prev != t:
         prev = t
-        t = GLUE_RE_LOWER.sub(r'\1 \2 \3', t)
+        t = GLUE_RE.sub(r'\1 \2 \3', t)
+        t = CAMEL_RE.sub(r'\1 \2', t)
 
-    # 2) normaliza inicio de bullet y espacios
+    # 3) normaliza inicio de bullet y espacios
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
     t = re.sub(r'[ \t]+', ' ', t)
     t = re.sub(r'\n\s+', '\n', t)
 
-    # 3) "X millones" y "X mil" -> CLP
+    # 4) "X millones" y "X mil" -> CLP
     def _mill_to_clp(m):
         raw = m.group(1).replace(",", ".")
         try:
@@ -360,7 +371,7 @@ def prettify_answer(text: str) -> str:
             return m.group(0)
     t = MILES_RE.sub(_mil_to_clp, t)
 
-    # 4) series de cantidades -> $ y "–"
+    # 5) series de cantidades -> $ y "–"
     def _series_to_clp_comma(m):
         nums = re.findall(r'\d{1,3}(?:,\d{3})+', m.group(1))
         clp = [f"${int(n.replace(',', '')):,}".replace(",", ".") for n in nums]
@@ -373,12 +384,15 @@ def prettify_answer(text: str) -> str:
         return " – ".join(clp)
     t = LIST_DOT_SERIES_RE.sub(_series_to_clp_dot, t)
 
-    # 5) números sueltos con separador -> CLP
+    # 6) cantidades sueltas con separador -> CLP
     t = CURRENCY_COMMA_RE.sub(lambda m: f"${int(m.group(1).replace(',', '')):,}".replace(",", "."), t)
     t = CURRENCY_DOT_RE.sub(  lambda m: f"${int(m.group(1).replace('.', '')):,}".replace(",", "."), t)
 
-    # 6) evita dobles $, y añade espacios tras puntuación
-    t = re.sub(r'\${2,}', '$', t)
+    # 7) normalizar prefijos y doble $
+    t = re.sub(r'(?:US|CLP|S|COP)\$', '$', t, flags=re.I)  # US$, CLP$, S$, COP$ -> $
+    t = re.sub(r'\${2,}', '$', t)                          # $$ -> $
+
+    # 8) espacios tras puntuación
     t = re.sub(r':(?=\S)', ': ', t)
     t = re.sub(r',(?=\S)', ', ', t)
 
@@ -454,7 +468,7 @@ def render_viz_instructions(instr_list, data_dict):
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
     for hoja, df in data.items():
-        if df is None o r df.empty: continue
+        if df is None or df.empty: continue
         cols = []; samples = {}
         for c in df.columns:
             cols.append(str(c))
@@ -525,7 +539,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
         if action == "chart" and chart == "auto":
             chart = _choose_chart_auto(df_fil, cat_real, val_real)
 
-        if action == "table" o r chart == "table":
+        if action == "table" or chart == "table":
             mostrar_tabla(df_fil, cat_real, val_real, title)
             st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":"tabla"}
             return True
@@ -583,7 +597,7 @@ def prompt_analisis_general(analisis_dict: dict) -> list:
         {"role":"system","content": make_system_prompt()},
         {"role":"user","content": f"""
 Con base en los siguientes KPIs calculados reales, realiza un ANÁLISIS PROFESIONAL siguiendo el formato obligatorio.
-No inventes datos fuera de lo entregado; si necesitas supuestos, declárallos de forma conservadora.
+No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos de forma conservadora.
 
 KPIs:
 {json.dumps(analisis_dict, ensure_ascii=False, indent=2)}
@@ -642,7 +656,7 @@ if st.session_state.menu_sel == "Datos":
         with st.form(key="form_gsheet"):
             url = st.text_input("URL de Google Sheet", value=st.session_state.sheet_url, key="k_url")
             conectar = st.form_submit_button("Conectar")
-        if conectar o r url:
+        if conectar and url:
             try:
                 st.session_state.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
                 st.session_state.sheet_url = url
@@ -672,7 +686,7 @@ elif st.session_state.menu_sel == "KPIs":
         c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
         c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
         c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
-        c4.metric("Margen %",     f"{(kpis['margen_pct'] o r 0):.1f}%")
+        c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
         c5, c6, c7 = st.columns(3)
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
@@ -744,7 +758,7 @@ elif st.session_state.menu_sel == "KPIs":
         else:
             with c3d: st.info("No se detectaron fechas para tendencia mensual.")
 
-# ----------- Consulta IA -----------
+# ----------- Consulta IA (texto + visual)
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
