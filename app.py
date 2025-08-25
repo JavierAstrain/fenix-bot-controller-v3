@@ -19,7 +19,7 @@ from analizador import analizar_datos_taller
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
-# Forzar tipografía/tamaño uniformes en todo el markdown
+# Tipografía y tamaños uniformes en todo el Markdown
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"] {
@@ -266,7 +266,7 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
                  .sum().sort_values(ascending=False))
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
-    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
+    ax.axis('equal'); ax.set_title(titulo o r f"{col_valor} por {col_categoria}")
     st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
@@ -285,14 +285,22 @@ VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
 # --- Normalización de texto y montos en respuestas IA ---
+
 LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 
-# 1,234,567 -> match
+# 1,234,567  -> a CLP
 CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
+# 1.234.567  -> a CLP
+CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 
 # series "751,084, 1,845,835 y 2,321,659"
 LIST_COMMA_SERIES_RE = re.compile(
-    r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
+    r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
+    re.I
+)
+# series "751.084, 1.845.835 y 2.321.659"
+LIST_DOT_SERIES_RE = re.compile(
+    r'(?<![\d$])((?:\d{1,3}(?:\.\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:\.\d{3})+))+)(?![\d$])',
     re.I
 )
 
@@ -300,30 +308,33 @@ LIST_COMMA_SERIES_RE = re.compile(
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 
-# Stopwords para "despegar" palabras pegadas (conunmargende -> con un margen de)
-STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que"
-GLUE_RE = re.compile(rf'([{LETTER}]{{2,}})({STOP})([{LETTER}]{{2,}})', re.I)  # ...margenDE42 -> margen DE 42
+# Split solo para minúsculas (evita romper FINANZAS)
+STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que|mientras"
+GLUE_RE_LOWER = re.compile(r'([a-záéíóúñ]{2,})(' + STOP + r')([a-záéíóúñ]{2,})', re.I)
 
 def prettify_answer(text: str) -> str:
-    """Limpia estilos, corrige espacios pegados, normaliza CLP y series de montos."""
+    """Limpia estilos, arregla espacios y normaliza montos (CLP)."""
     if not text:
         return text
     t = text
 
     # 0) limpiar HTML/estilos y bullets
     t = re.sub(r'<[^>]+>', '', t)
-    t = t.replace("\u00A0", " ")          # NBSP -> espacio normal
-    t = t.replace("•", "\n- ")            # cada bullet en su línea
-    t = re.sub(r'([*_`]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas/código inline
-    t = t.replace("“","\"").replace("”","\"").replace("’","'") # comillas uniformes
+    t = t.replace("\u00A0", " ")
+    t = t.replace("•", "\n- ")
+    # quitar todos los _ y * sueltos que activan markdown
+    t = t.replace("_", "").replace("*", "").replace("`", "")
+    t = t.replace("“","\"").replace("”","\"").replace("’","'")
+    # aseguramos saltos tras títulos markdown largos en una sola línea
+    t = re.sub(r'^(#{1,6}\s+[^\n]+)$', r'\1\n', t, flags=re.M)
 
-    # 1) separar dígitos/letras y "despegar" stopwords pegadas (loop hasta estabilizar)
+    # 1) separar dígitos/letras y "despegar" en minúsculas (loop hasta estabilizar)
     t = re.sub(rf'(?<=\d)(?=[{LETTER}])', ' ', t)
     t = re.sub(rf'(?<=[{LETTER}])(?=\d)', ' ', t)
     prev = None
     while prev != t:
         prev = t
-        t = GLUE_RE.sub(r'\1 \2 \3', t)
+        t = GLUE_RE_LOWER.sub(r'\1 \2 \3', t)
 
     # 2) normaliza inicio de bullet y espacios
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
@@ -350,21 +361,24 @@ def prettify_answer(text: str) -> str:
     t = MILES_RE.sub(_mil_to_clp, t)
 
     # 4) series de cantidades -> $ y "–"
-    def _series_to_clp(m):
-        series = m.group(1)
-        nums = re.findall(r'\d{1,3}(?:,\d{3})+', series)
+    def _series_to_clp_comma(m):
+        nums = re.findall(r'\d{1,3}(?:,\d{3})+', m.group(1))
         clp = [f"${int(n.replace(',', '')):,}".replace(",", ".") for n in nums]
         return " – ".join(clp)
-    t = LIST_COMMA_SERIES_RE.sub(_series_to_clp, t)
+    t = LIST_COMMA_SERIES_RE.sub(_series_to_clp_comma, t)
 
-    # 5) números sueltos con coma -> CLP
-    def _to_clp(m):
-        n = int(m.group(1).replace(",", ""))
-        return f"${n:,}".replace(",", ".")
-    t = CURRENCY_COMMA_RE.sub(_to_clp, t)
+    def _series_to_clp_dot(m):
+        nums = re.findall(r'\d{1,3}(?:\.\d{3})+', m.group(1))
+        clp = [f"${int(n.replace('.', '')):,}".replace(",", ".") for n in nums]
+        return " – ".join(clp)
+    t = LIST_DOT_SERIES_RE.sub(_series_to_clp_dot, t)
+
+    # 5) números sueltos con separador -> CLP
+    t = CURRENCY_COMMA_RE.sub(lambda m: f"${int(m.group(1).replace(',', '')):,}".replace(",", "."), t)
+    t = CURRENCY_DOT_RE.sub(  lambda m: f"${int(m.group(1).replace('.', '')):,}".replace(",", "."), t)
 
     # 6) evita dobles $, y añade espacios tras puntuación
-    t = re.sub(r'\$\s*\$+', '$', t)
+    t = re.sub(r'\${2,}', '$', t)
     t = re.sub(r':(?=\S)', ': ', t)
     t = re.sub(r',(?=\S)', ', ', t)
 
@@ -440,7 +454,7 @@ def render_viz_instructions(instr_list, data_dict):
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
     for hoja, df in data.items():
-        if df is None or df.empty: continue
+        if df is None o r df.empty: continue
         cols = []; samples = {}
         for c in df.columns:
             cols.append(str(c))
@@ -511,7 +525,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
         if action == "chart" and chart == "auto":
             chart = _choose_chart_auto(df_fil, cat_real, val_real)
 
-        if action == "table" or chart == "table":
+        if action == "table" o r chart == "table":
             mostrar_tabla(df_fil, cat_real, val_real, title)
             st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":"tabla"}
             return True
@@ -628,7 +642,7 @@ if st.session_state.menu_sel == "Datos":
         with st.form(key="form_gsheet"):
             url = st.text_input("URL de Google Sheet", value=st.session_state.sheet_url, key="k_url")
             conectar = st.form_submit_button("Conectar")
-        if conectar and url:
+        if conectar o r url:
             try:
                 st.session_state.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
                 st.session_state.sheet_url = url
@@ -658,7 +672,7 @@ elif st.session_state.menu_sel == "KPIs":
         c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
         c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
         c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
-        c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
+        c4.metric("Margen %",     f"{(kpis['margen_pct'] o r 0):.1f}%")
         c5, c6, c7 = st.columns(3)
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
@@ -730,7 +744,7 @@ elif st.session_state.menu_sel == "KPIs":
         else:
             with c3d: st.info("No se detectaron fechas para tendencia mensual.")
 
-# ----------- Consulta IA (texto a la izquierda, visual a la derecha) -----------
+# ----------- Consulta IA -----------
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
@@ -781,7 +795,7 @@ elif st.session_state.menu_sel == "Historial":
     else:
         st.info("Aún no hay historial en esta sesión.")
 
-# ----------- Diagnóstico IA (solo API) -----------
+# ----------- Diagnóstico IA -----------
 elif st.session_state.menu_sel == "Diagnóstico IA":
     st.markdown("### 🔎 Diagnóstico de la IA (OpenAI)")
     st.caption("Verifica API Key, conexión, prueba mínima de chat y estado de créditos/cuota.")
