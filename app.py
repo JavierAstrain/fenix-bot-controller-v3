@@ -19,6 +19,23 @@ from analizador import analizar_datos_taller
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
+# Forzar tipografía/tamaño uniformes en todo el markdown
+st.markdown("""
+<style>
+html, body, [data-testid="stMarkdownContainer"] {
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif !important;
+  font-size: 15.5px !important;
+  line-height: 1.55 !important;
+}
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3 {
+  font-weight: 700 !important;
+  letter-spacing: .2px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ---------------------------
 # ESTADO PERSISTENTE
 # ---------------------------
@@ -268,46 +285,57 @@ VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
 ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
 
 # --- Normalización de texto y montos en respuestas IA ---
-CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')   # 1,234,567
+LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
+
+# 1,234,567 -> match
+CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
+
+# series "751,084, 1,845,835 y 2,321,659"
 LIST_COMMA_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
     re.I
 )
-MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')      # optional $
-MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')            # optional $
 
-LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
+# "X millones" / "X mil" (con o sin $)
+MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
+MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
+
+# Stopwords para "despegar" palabras pegadas (conunmargende -> con un margen de)
+STOP = r"con|de|del|la|las|el|los|un|una|unos|unas|y|e|por|para|al|en|que"
+GLUE_RE = re.compile(rf'([{LETTER}]{{2,}})({STOP})([{LETTER}]{{2,}})', re.I)  # ...margenDE42 -> margen DE 42
 
 def prettify_answer(text: str) -> str:
-    """Limpia estilos/HTML, corrige espacios pegados, normaliza CLP y listas de montos."""
-    if not text: return text
+    """Limpia estilos, corrige espacios pegados, normaliza CLP y series de montos."""
+    if not text:
+        return text
     t = text
 
-    # 0) limpiar HTML y marcas de estilo inline
-    t = re.sub(r'<[^>]+>', '', t)                          # quita tags HTML (em/i/strong etc.)
-    t = t.replace("\u00A0", " ")                           # NBSP -> espacio
-    t = t.replace("•", "\n- ")                             # bullets en nueva línea
+    # 0) limpiar HTML/estilos y bullets
+    t = re.sub(r'<[^>]+>', '', t)
+    t = t.replace("\u00A0", " ")          # NBSP -> espacio normal
+    t = t.replace("•", "\n- ")            # cada bullet en su línea
     t = re.sub(r'([*_`]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas/código inline
+    t = t.replace("“","\"").replace("”","\"").replace("’","'") # comillas uniformes
 
-    # 1) arregla palabras pegadas dígitos/letras
+    # 1) separar dígitos/letras y "despegar" stopwords pegadas (loop hasta estabilizar)
     t = re.sub(rf'(?<=\d)(?=[{LETTER}])', ' ', t)
     t = re.sub(rf'(?<=[{LETTER}])(?=\d)', ' ', t)
+    prev = None
+    while prev != t:
+        prev = t
+        t = GLUE_RE.sub(r'\1 \2 \3', t)
 
-    # 1.b) heurística: inserta espacios alrededor de preposiciones/artículos pegados
-    stopwords = ["con","de","del","la","los","en","el","un","una","y","e","por","para","al","del"]
-    for _ in range(2):  # dos pasadas suelen bastar
-        for w in stopwords:
-            t = re.sub(rf'(?i)(?<=\w){w}(?=\w)', f' {w} ', t)
-
-    # 2) normaliza inicio de bullet
+    # 2) normaliza inicio de bullet y espacios
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
+    t = re.sub(r'[ \t]+', ' ', t)
+    t = re.sub(r'\n\s+', '\n', t)
 
-    # 3) "X millones" y "X mil" -> CLP (sin duplicar $)
+    # 3) "X millones" y "X mil" -> CLP
     def _mill_to_clp(m):
         raw = m.group(1).replace(",", ".")
         try:
             val = float(raw) * 1_000_000
-            return _fmt_pesos(val)
+            return f"${int(round(val)):,}".replace(",", ".")
         except Exception:
             return m.group(0)
     t = MILLONES_RE.sub(_mill_to_clp, t)
@@ -316,43 +344,29 @@ def prettify_answer(text: str) -> str:
         raw = m.group(1).replace(",", ".")
         try:
             val = float(raw) * 1_000
-            return _fmt_pesos(val)
+            return f"${int(round(val)):,}".replace(",", ".")
         except Exception:
             return m.group(0)
     t = MILES_RE.sub(_mil_to_clp, t)
 
-    # 4) Series con comas o "y/e": -> $ y "–"
+    # 4) series de cantidades -> $ y "–"
     def _series_to_clp(m):
         series = m.group(1)
         nums = re.findall(r'\d{1,3}(?:,\d{3})+', series)
-        clp = [_fmt_pesos(int(n.replace(",", ""))) for n in nums]
+        clp = [f"${int(n.replace(',', '')):,}".replace(",", ".") for n in nums]
         return " – ".join(clp)
     t = LIST_COMMA_SERIES_RE.sub(_series_to_clp, t)
 
-    # 5) Números sueltos con coma -> CLP
+    # 5) números sueltos con coma -> CLP
     def _to_clp(m):
         n = int(m.group(1).replace(",", ""))
-        return _fmt_pesos(n)
+        return f"${n:,}".replace(",", ".")
     t = CURRENCY_COMMA_RE.sub(_to_clp, t)
 
-    # 6) Evita doble $
-    t = re.sub(r'\$\s*\$', '$', t)
-
-    # 7) Separador guion largo entre $x y $y
-    while True:
-        t_new, n1 = re.subn(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)
-        t_new, n2 = re.subn(r'(\$\d[\d\.]*)\s+(?:y|e)\s+(?=\$\d)', r'\1 – ', t_new, flags=re.I)
-        t = t_new
-        if n1 + n2 == 0:
-            break
-
-    # 8) espacios tras puntuación
+    # 6) evita dobles $, y añade espacios tras puntuación
+    t = re.sub(r'\$\s*\$+', '$', t)
     t = re.sub(r':(?=\S)', ': ', t)
     t = re.sub(r',(?=\S)', ', ', t)
-
-    # 9) colapsa espacios, preservando saltos de línea
-    t = re.sub(r'[ \t]+', ' ', t)
-    t = re.sub(r'\n\s+', '\n', t)
 
     return t.strip()
 
@@ -555,7 +569,7 @@ def prompt_analisis_general(analisis_dict: dict) -> list:
         {"role":"system","content": make_system_prompt()},
         {"role":"user","content": f"""
 Con base en los siguientes KPIs calculados reales, realiza un ANÁLISIS PROFESIONAL siguiendo el formato obligatorio.
-No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos de forma conservadora.
+No inventes datos fuera de lo entregado; si necesitas supuestos, declárallos de forma conservadora.
 
 KPIs:
 {json.dumps(analisis_dict, ensure_ascii=False, indent=2)}
@@ -788,4 +802,3 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
-
