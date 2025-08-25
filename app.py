@@ -13,6 +13,7 @@ from html import escape
 from typing import Dict, Any, List, Optional
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
+from streamlit.components.v1 import html as st_html  # <- iframe HTML blindado
 from analizador import analizar_datos_taller
 
 # ---------------------------
@@ -34,10 +35,8 @@ html, body, [data-testid="stMarkdownContainer"] {
   font-weight: 700 !important;
   letter-spacing: .2px;
 }
-/* Evita cursivas aunque haya *...* o _..._ en la respuesta */
 [data-testid="stMarkdownContainer"] em,
 [data-testid="stMarkdownContainer"] i { font-style: normal !important; }
-/* Evita monospace y fondos en `code` */
 [data-testid="stMarkdownContainer"] code { font-family: inherit !important; background: transparent !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -108,21 +107,6 @@ def ask_gpt(messages) -> str:
         st.error(f"Fallo en la petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
-def ask_gpt_structured(messages) -> Optional[dict]:
-    """Devuelve dict si el modelo responde JSON válido; None si no."""
-    raw = ask_gpt(messages).strip()
-    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, flags=re.S|re.I)
-    if m:
-        raw = m.group(1)
-    else:
-        m = re.search(r"\{(?:[^{}]|(?R))*\}", raw, flags=re.S)
-        if m: raw = m.group(0)
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
 def diagnosticar_openai():
     res = {
         "api_key_present": False, "organization_set": False, "base_url_set": False,
@@ -168,10 +152,9 @@ def diagnosticar_openai():
 # ---------------------------
 LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 
-# Separadores de miles
 CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
 CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
-# Series
+
 LIST_COMMA_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
     re.I
@@ -180,7 +163,7 @@ LIST_DOT_SERIES_RE = re.compile(
     r'(?<![\d$])((?:\d{1,3}(?:\.\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:\.\d{3})+))+)(?![\d$])',
     re.I
 )
-# “X millones / X mil”
+
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 
@@ -245,7 +228,7 @@ def prettify_answer(text: str) -> str:
     t = re.sub(r',(?=\S)', ', ', t)
     return t.strip()
 
-# ---- Neutralización LaTeX + Render HTML plano (sin Markdown) ----
+# ---- Neutralización LaTeX + Render HTML plano (sin Markdown / sin KaTeX) ----
 def sanitize_text_for_html(s: str) -> str:
     """Normaliza unicode, elimina invisibles y neutraliza delimitadores LaTeX."""
     if not s: return ""
@@ -295,6 +278,31 @@ def _render_sections_html(sections: List[tuple[str, List[str]]]) -> None:
     html_blocks = [_bullets_html(t, lst) for (t, lst) in sections if lst]
     if html_blocks:
         st.markdown("\n".join(html_blocks), unsafe_allow_html=True)
+
+# Render en iframe (blindado, sin KaTeX ni Markdown de Streamlit)
+def render_ia_html_block(text: str, height: int = 560):
+    """
+    Renderiza la respuesta de IA en un iframe HTML (sin Markdown/KaTeX).
+    Usa nuestros normalizadores y luego pinta HTML plano.
+    """
+    safe_html = md_to_safe_html(text or "")
+    page = f"""
+    <!doctype html><html><head><meta charset="utf-8">
+    <style>
+      :root {{
+        --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
+                 "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
+      }}
+      html,body {{ margin:0; padding:0; font: 15.5px/1.55 var(--font); }}
+      h3 {{ margin: 0 0 .5rem; font-weight: 700; }}
+      ul {{ margin: .25rem 0 .75rem 1.25rem; padding-left: 1rem; }}
+      li, p {{ margin: .25rem 0; font-style: normal; letter-spacing: .2px; white-space: normal; }}
+      em,i {{ font-style: normal !important; }}
+      code {{ font-family: inherit !important; background: transparent !important; }}
+    </style></head>
+    <body>{safe_html}</body></html>
+    """.strip()
+    st_html(page, height=height, scrolling=True)
 
 # ---------------------------
 # VISUALIZACIONES
@@ -408,7 +416,7 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
     ax.axis('equal')
-    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
+    ax.set_title(titulo o r f"{col_valor} por {col_categoria}")
     st.pyplot(fig)
     st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
@@ -654,7 +662,7 @@ elif st.session_state.menu_sel == "KPIs":
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
         c6.metric("Ticket promedio", f"${int(round(tp)):,}".replace(",", ".") if tp else "—")
-        conv = st.session_state.get("conversion_pct", kpis.get("conversion_pct"))
+        conv = kpis.get("conversion_pct")
         c7.metric("Conversión",   f"{conv:.1f}%" if conv is not None else "—")
         lt = kpis.get("lead_time_mediano_dias")
         if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
@@ -721,7 +729,7 @@ elif st.session_state.menu_sel == "KPIs":
         else:
             with c3d: st.info("No se detectaron fechas para tendencia mensual.")
 
-# ----------- Consulta IA (HTML plano + viz a la derecha) -----------
+# ----------- Consulta IA (HTML plano en iframe + viz a la derecha) -----------
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
@@ -737,7 +745,7 @@ elif st.session_state.menu_sel == "Consulta IA":
             raw = ask_gpt(prompt_analisis_general(analisis))
             texto, instr = split_text_and_viz(raw)
             with left:
-                st.markdown(md_to_safe_html(texto), unsafe_allow_html=True)
+                render_ia_html_block(texto, height=620)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
@@ -751,7 +759,7 @@ elif st.session_state.menu_sel == "Consulta IA":
             raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
             texto, instr = split_text_and_viz(raw)
             with left:
-                st.markdown(md_to_safe_html(texto), unsafe_allow_html=True)
+                render_ia_html_block(texto, height=620)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
@@ -765,12 +773,12 @@ elif st.session_state.menu_sel == "Historial":
         for i, h in enumerate(st.session_state.historial[-20:], 1):
             st.markdown(f"**Q{i}:** {h['pregunta']}")
             st.markdown(f"**A{i}:**")
-            # Si la respuesta es JSON serializado, muéstrala como JSON; si no, HTML plano
+            # JSON → st.json; texto → iframe HTML blindado
             try:
                 parsed = json.loads(h["respuesta"])
                 st.json(parsed)
             except Exception:
-                st.markdown(md_to_safe_html(h["respuesta"]), unsafe_allow_html=True)
+                render_ia_html_block(h["respuesta"], height=520)
     else:
         st.info("Aún no hay historial en esta sesión.")
 
@@ -795,4 +803,3 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
-
