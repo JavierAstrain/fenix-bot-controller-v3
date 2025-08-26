@@ -9,37 +9,15 @@ import json
 import re
 import unicodedata
 import os
-from html import escape
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
-from streamlit.components.v1 import html as st_html
 from analizador import analizar_datos_taller
 
 # ---------------------------
 # CONFIG
 # ---------------------------
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
-
-# Tipografía/tamaño uniformes (para el resto de la app)
-st.markdown("""
-<style>
-html, body, [data-testid="stMarkdownContainer"] {
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif !important;
-  font-size: 15.5px !important;
-  line-height: 1.55 !important;
-}
-[data-testid="stMarkdownContainer"] h1,
-[data-testid="stMarkdownContainer"] h2,
-[data-testid="stMarkdownContainer"] h3 {
-  font-weight: 700 !important;
-  letter-spacing: .2px;
-}
-[data-testid="stMarkdownContainer"] em,
-[data-testid="stMarkdownContainer"] i { font-style: normal !important; }
-[data-testid="stMarkdownContainer"] code { font-family: inherit !important; background: transparent !important; }
-</style>
-""", unsafe_allow_html=True)
 
 # ---------------------------
 # ESTADO PERSISTENTE
@@ -102,16 +80,22 @@ def ask_gpt(messages) -> str:
             messages=messages,
             temperature=0.15
         )
-        return resp.choices[0].message.content or ""
+        return resp.choices[0].message.content
     except Exception as e:
         st.error(f"Fallo en la petición a OpenAI: {e}")
         return "⚠️ No pude completar la consulta a la IA."
 
 def diagnosticar_openai():
+    """Diagnóstico de credenciales/cuota."""
     res = {
-        "api_key_present": False, "organization_set": False, "base_url_set": False,
-        "list_models_ok": False, "chat_ok": False, "quota_ok": None,
-        "usage_tokens": None, "error": None
+        "api_key_present": False,
+        "organization_set": False,
+        "base_url_set": False,
+        "list_models_ok": False,
+        "chat_ok": False,
+        "quota_ok": None,
+        "usage_tokens": None,
+        "error": None
     }
     key = (
         st.secrets.get("OPENAI_API_KEY")
@@ -124,205 +108,48 @@ def diagnosticar_openai():
     if not res["api_key_present"]:
         res["error"] = "No se encontró OPENAI_API_KEY."
         return res
+
     client = _get_openai_client()
     if client is None:
         res["error"] = "No se pudo inicializar el cliente OpenAI."
         return res
+
     try:
-        _ = client.models.list(); res["list_models_ok"] = True
+        _ = client.models.list()
+        res["list_models_ok"] = True
     except Exception as e:
-        res["error"] = f"Error listando modelos: {e}"; return res
+        msg = str(e).lower()
+        res["error"] = f"Error listando modelos: {e}"
+        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
+            res["quota_ok"] = False
+        return res
+
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Ping diagnóstico. Responde: OK."}],
-            temperature=0, max_tokens=5
+            messages=[{"role": "user", "content": "Ping de diagnóstico. Responde: OK."}],
+            temperature=0,
+            max_tokens=5
         )
         res["chat_ok"] = True
-        if getattr(r, "usage", None) and getattr(r.usage, "total_tokens", None) is not None:
-            res["usage_tokens"] = int(r.usage.total_tokens)
+        try:
+            if hasattr(r, "usage") and r.usage and r.usage.total_tokens is not None:
+                res["usage_tokens"] = int(r.usage.total_tokens)
+        except Exception:
+            pass
         if res["quota_ok"] is None: res["quota_ok"] = True
     except Exception as e:
+        msg = str(e).lower()
         res["error"] = f"Error en prueba de chat: {e}"
-        res["quota_ok"] = None
+        if "insufficient_quota" in msg or "exceeded your current quota" in msg:
+            res["quota_ok"] = False
+        else:
+            res["quota_ok"] = None
     return res
 
 # ---------------------------
-# NORMALIZACIÓN / SANITIZACIÓN
+# UTILIDADES
 # ---------------------------
-LETTER = r"A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
-
-CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
-CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
-
-LIST_COMMA_SERIES_RE = re.compile(
-    r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
-    re.I
-)
-LIST_DOT_SERIES_RE = re.compile(
-    r'(?<![\d$])((?:\d{1,3}(?:\.\d{3})+)(?:\s*(?:,|y|e|–|-)\s*(?:\d{1,3}(?:\.\d{3})+))+)(?![\d$])',
-    re.I
-)
-
-MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
-MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
-
-CONNECTORS = ["con","de","del","la","las","el","los","un","una","unos","unas","y","e",
-              "por","para","al","en","que","mientras","entre","sobre","hasta","desde"]
-
-ALL_SPACES_RE = re.compile(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]')
-INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')
-TITLE_LINE_RE = re.compile(r'^(#{1,6}\s+[^\n]+)$', re.M)
-
-def _to_clp(i: int) -> str:
-    return f"${i:,}".replace(",", ".")
-
-def _inject_spaces_connectors(t: str) -> str:
-    for w in CONNECTORS:
-        t = re.sub(rf'(?i)(?<=\b){w}(?=[{LETTER}])', f'{w} ', t)
-        t = re.sub(rf'(?i)(?<=[{LETTER}]){w}(?=\b)', f' {w}', t)
-    t = re.sub(r'(?i)\bmargende\b', 'margen de', t)
-    t = re.sub(r'(?i)\bmientrasque\b', 'mientras que', t)
-    return t
-
-def prettify_answer(text: str) -> str:
-    """Saneado general + normalización financiera (CLP)."""
-    if not text: return text
-    t = unicodedata.normalize("NFKC", text)
-    t = re.sub(r'<[^>]+>', '', t)
-    t = INVISIBLES_RE.sub('', t)
-    t = ALL_SPACES_RE.sub(' ', t)
-    t = t.replace("•", "\n- ")
-    t = t.replace("“","\"").replace("”","\"").replace("’","'")
-    t = re.sub(r'([*_`~]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)
-    t = TITLE_LINE_RE.sub(r'\1\n', t)
-    t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
-    t = re.sub(r'[ \t]+', ' ', t)
-    t = re.sub(r'\n\s+', '\n', t)
-    t = _inject_spaces_connectors(t)
-    t = re.sub(r'([a-záéíóúñ]{2,})([A-ZÁÉÍÓÚÑ])', r'\1 \2', t)
-    t = re.sub(r'(?i)(?:US|CLP|COP|S)\s*\$', '$', t)
-    def _mill_to_clp(m):
-        raw = m.group(1).replace(",", ".")
-        try: return _to_clp(int(round(float(raw) * 1_000_000)))
-        except: return m.group(0)
-    t = MILLONES_RE.sub(_mill_to_clp, t)
-    def _mil_to_clp(m):
-        raw = m.group(1).replace(",", ".")
-        try: return _to_clp(int(round(float(raw) * 1_000)))
-        except: return m.group(0)
-    t = MILES_RE.sub(_mil_to_clp, t)
-    def _series(nums, dot=False):
-        out = []
-        for n in nums:
-            val = int(n.replace('.' if dot else ',', ''))
-            out.append(_to_clp(val))
-        return " – ".join(out)
-    t = LIST_COMMA_SERIES_RE.sub(lambda m: _series(re.findall(r'\d{1,3}(?:,\d{3})+', m.group(1)), False), t)
-    t = LIST_DOT_SERIES_RE.sub(  lambda m: _series(re.findall(r'\d{1,3}(?:\.\d{3})+', m.group(1)), True),  t)
-    t = CURRENCY_COMMA_RE.sub(lambda m: _to_clp(int(m.group(1).replace(',', ''))), t)
-    t = CURRENCY_DOT_RE.sub(  lambda m: _to_clp(int(m.group(1).replace('.', ''))), t)
-    t = re.sub(r'\$\s*\$+', '$', t)
-    t = re.sub(r'\$\s+(?=\d)', '$', t)
-    t = re.sub(r':(?=\S)', ': ', t)
-    t = re.sub(r',(?=\S)', ', ', t)
-    return t.strip()
-
-# ---- Neutralización LaTeX + $ -> &#36; y HTML plano ----
-def sanitize_text_for_html(s: str) -> str:
-    """
-    Normaliza unicode, elimina invisibles, neutraliza delimitadores LaTeX
-    y convierte cualquier '$' remanente en '&#36;' para impedir KaTeX.
-    """
-    if not s: return ""
-    t = unicodedata.normalize("NFKC", s)
-    # Invisibles y NBSP → espacio
-    t = re.sub(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]', '', t)
-    t = re.sub(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]', ' ', t)
-    # Neutraliza LaTeX (dejando texto literal)
-    t = re.sub(r'\\\((.*?)\\\)', r'\1', t, flags=re.S)   # \( … \)
-    t = re.sub(r'\\\[(.*?)\\\]', r'\1', t, flags=re.S)   # \[ … \]
-    t = re.sub(r'\$\$(.*?)\$\$', r'\1', t, flags=re.S)   # $$ … $$
-    # Colapsa dobles $
-    t = re.sub(r'\$\s*\$+', '$', t)
-    # MATA KaTeX: todos los $ → entidad HTML (visualmente sigue siendo $)
-    t = t.replace('$', '&#36;')
-    # Bullets y espacios
-    t = t.replace("•", "\n- ")
-    t = re.sub(r'[ \t]+', ' ', t)
-    t = re.sub(r'\n\s+', '\n', t)
-    return t.strip()
-
-def md_to_safe_html(markdown_text: str) -> str:
-    """
-    Convierte nuestro 'markdown simple' (### y '- ') a HTML plano y escapado.
-    Pasa por prettify (moneda/series) y sanitize (LaTeX + $→&#36;), luego escapa.
-    """
-    base = prettify_answer(markdown_text or "")
-    t = sanitize_text_for_html(base)
-    out, ul = [], False
-    for raw in t.splitlines():
-        line = raw.strip()
-        if not line:
-            if ul: out.append("</ul>"); ul = False
-            continue
-        if line.startswith("###"):
-            if ul: out.append("</ul>"); ul = False
-            out.append(f"<h3>{escape(line.lstrip('#').strip())}</h3>")
-        elif line.startswith("- "):
-            if not ul: out.append("<ul>"); ul = True
-            out.append(f"<li>{escape(line[2:].strip())}</li>")
-        else:
-            if ul: out.append("</ul>"); ul = False
-            out.append(f"<p>{escape(line)}</p>")
-    if ul: out.append("</ul>")
-    return "\n".join(out)
-
-def _bullets_html(title: str, items: List[str]) -> str:
-    if not items: return ""
-    lis = "\n".join(f"<li>{escape(prettify_answer(str(i)))}</li>" for i in items if str(i).strip())
-    return f"<h3>{escape(title)}</h3>\n<ul>\n{lis}\n</ul>"
-
-def _render_sections_html(sections: List[tuple[str, List[str]]]) -> None:
-    html_blocks = [_bullets_html(t, lst) for (t, lst) in sections if lst]
-    if html_blocks:
-        st.markdown("\n".join(html_blocks), unsafe_allow_html=True)
-
-def render_ia_html_block(text: str, height: int = 560):
-    """
-    Renderiza la respuesta de IA en un iframe HTML (sin Markdown/KaTeX).
-    Usa nuestros normalizadores y luego pinta HTML plano.
-    """
-    safe_html = md_to_safe_html(text or "")
-    page = f"""<!doctype html><html><head><meta charset="utf-8">
-    <style>
-      :root {{ --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
-                 "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif; }}
-      html,body {{ margin:0; padding:0; font: 15.5px/1.55 var(--font); }}
-      h3 {{ margin:0 0 .5rem; font-weight:700; }}
-      ul {{ margin:.25rem 0 .75rem 1.25rem; padding-left:1rem; }}
-      li,p {{ margin:.25rem 0; font-style:normal; letter-spacing:.2px; white-space:normal; }}
-      em,i {{ font-style: normal !important; }}
-      code {{ font-family: inherit !important; background: transparent !important; }}
-    </style></head><body>{safe_html}</body></html>"""
-    st_html(page, height=height, scrolling=True)
-
-# ---------------------------
-# VISUALIZACIONES
-# ---------------------------
-def _fmt_pesos(x, pos=None):
-    try:
-        if x is None or (isinstance(x, float) and np.isnan(x)): return ""
-        return f"${int(round(x)):,}".replace(",", ".")
-    except Exception:
-        return str(x)
-
-def _export_fig(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
-    buf.seek(0)
-    return buf.read()
-
 def _norm(s: str) -> str:
     s = str(s).replace("\u00A0"," ").strip()
     s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
@@ -340,6 +167,21 @@ def find_col(df: pd.DataFrame, name: str):
     candidates = [c for c in df.columns if tgt in _norm(c) or _norm(c).startswith(tgt[:4])]
     return candidates[0] if candidates else None
 
+def _fmt_pesos(x, pos=None):
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)): return ""
+        return f"${int(round(x)):,}".replace(",", ".")
+    except Exception:
+        return str(x)
+
+def _export_fig(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=180)
+    buf.seek(0); return buf.read()
+
+# ---------------------------
+# VISUALIZACIONES
+# ---------------------------
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
@@ -358,8 +200,7 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_ylabel(col_valor)
-    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_ylabel(col_valor); ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
     ax.tick_params(axis='x', rotation=45)
     for lbl in ax.get_xticklabels(): lbl.set_ha('right')
     for b in bars:
@@ -367,24 +208,19 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
         if np.isfinite(y):
             ax.annotate(_fmt_pesos(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
-    fig.tight_layout()
-    st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
     bars = ax.barh(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_xlabel(col_valor)
-    ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_xlabel(col_valor); ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
     for b in bars:
         x = b.get_width()
         if np.isfinite(x):
             ax.annotate(_fmt_pesos(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
                         xytext=(5,0), ha='left', va='center', fontsize=8)
-    fig.tight_layout()
-    st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    fig.tight_layout(); st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -392,12 +228,10 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
                  .sum().sort_values(ascending=False))
     try:
         if len(resumen) >= 8:
-            top_val = float(resumen.iloc[0])
-            med = float(np.median(resumen.values))
+            top_val = float(resumen.iloc[0]); med = float(np.median(resumen.values))
             if med > 0 and top_val / med >= 3.0:
                 st.info("Distribución desbalanceada: muestro tabla para mejor lectura.")
-                mostrar_tabla(df, col_categoria, col_valor, titulo)
-                return
+                mostrar_tabla(df, col_categoria, col_valor, titulo); return
     except Exception:
         pass
     if top_n is None: top_n = st.session_state.get("top_n_grafico", 12)
@@ -405,12 +239,9 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
     if len(resumen) > top_n:
         resumen = resumen.head(top_n); recorte = True
     labels = resumen.index.astype(str)
-    if labels.str.len().mean() > 10:
-        _barras_horizontal(resumen, col_categoria, col_valor, titulo)
-    else:
-        _barras_vertical(resumen, col_categoria, col_valor, titulo)
-    if recorte:
-        st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
+    if labels.str.len().mean() > 10: _barras_horizontal(resumen, col_categoria, col_valor, titulo)
+    else:                            _barras_vertical(resumen, col_categoria, col_valor, titulo)
+    if recorte: st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
 
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -418,15 +249,12 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
                  .sum().sort_values(ascending=False))
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
-    ax.axis('equal')
-    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
+    st.pyplot(fig); st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     cat_norm = _norm(cat_col)
-    id_hints = ["patente","folio","nro","numero","número","doc","documento","factura","boleta","oc","orden",
-                "presupuesto","cotizacion","cotización"]
+    id_hints = ["patente","folio","nro","numero","número","doc","documento","factura","boleta","oc","orden","presupuesto","cotizacion","cotización"]
     if any(h in cat_norm for h in id_hints): return "table"
     nunique = df[cat_col].nunique(dropna=False)
     if nunique <= 6: return "torta"
@@ -434,11 +262,90 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     return "table"
 
 # ---------------------------
-# TEXTO + VIZ (parser simple de 'viz:')
+# PARSER/HELPERS PARA TEXTO+VIZ
 # ---------------------------
 VIZ_PATT = re.compile(r'(?:^|\n)\s*(?:viz\s*:\s*([^\n\r]+))', re.IGNORECASE)
+ALT_PATT = re.compile(r'(grafico_torta|grafico_barras|tabla)(?:@([^\s:]+))?\s*:\s*([^\n\r]+)', re.IGNORECASE)
+
+# --- Normalización de texto y montos en respuestas IA ---
+CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')   # 1,234,567
+LIST_COMMA_SERIES_RE = re.compile(
+    r'(?<![\d$])((?:\d{1,3}(?:,\d{3})+)(?:\s*(?:,|y|e)\s*(?:\d{1,3}(?:,\d{3})+))+)(?![\d$])',
+    re.I
+)
+MILLONES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*millone?s\b')
+MILES_RE = re.compile(r'(?i)\b(\d+(?:[.,]\d+)?)\s*mil\b')
+
+def _fmt_pesos_str(x: int) -> str:
+    try:
+        return _fmt_pesos(int(x))
+    except Exception:
+        return str(x)
+
+def prettify_answer(text: str) -> str:
+    """Limpia estilos raros, normaliza bullets, pone $ y puntos a miles,
+       convierte 'X millones/mil' a CLP y formatea listas de montos."""
+    if not text: return text
+    t = text
+
+    # 0) limpiar backticks/cursivas y forzar saltos en bullets
+    t = t.replace("\u00A0", " ")
+    t = t.replace("•", "\n- ")                      # bullets en línea -> saltos de línea
+    t = re.sub(r'([*_`]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)  # quita cursivas/negritas/código inline
+
+    # 1) espacio entre dígitos y letras pegadas
+    t = re.sub(r'(?<=\d)(?=[A-Za-zÁÉÍÓÚáéíóúñÑ])', ' ', t)
+    t = re.sub(r'(?<=[A-Za-zÁÉÍÓÚáéíóúñÑ])(?=\d)', ' ', t)
+
+    # 2) normaliza inicio de bullet
+    t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
+
+    # 3) "X millones" y "X mil" -> CLP
+    def _mill_to_clp(m):
+        raw = m.group(1).replace(",", ".")
+        try:
+            val = float(raw) * 1_000_000
+            return _fmt_pesos(val)
+        except Exception:
+            return m.group(0)
+    t = MILLONES_RE.sub(_mill_to_clp, t)
+
+    def _mil_to_clp(m):
+        raw = m.group(1).replace(",", ".")
+        try:
+            val = float(raw) * 1_000
+            return _fmt_pesos(val)
+        except Exception:
+            return m.group(0)
+    t = MILES_RE.sub(_mil_to_clp, t)
+
+    # 4) Series de cantidades con comas o "y/e": conviértelas a $ y sepáralas con "–"
+    def _series_to_clp(m):
+        series = m.group(1)
+        nums = re.findall(r'\d{1,3}(?:,\d{3})+', series)
+        clp = [_fmt_pesos(int(n.replace(",", ""))) for n in nums]
+        return " – ".join(clp)
+    t = LIST_COMMA_SERIES_RE.sub(_series_to_clp, t)
+
+    # 5) Números sueltos con coma -> CLP
+    def _to_clp(m):
+        n = int(m.group(1).replace(",", ""))
+        return _fmt_pesos(n)
+    t = CURRENCY_COMMA_RE.sub(_to_clp, t)
+
+    # 6) Listas de $ separadas por coma o "y/e" -> guion largo
+    # aplicar hasta que no queden más coincidencias
+    while True:
+        t_new, n1 = re.subn(r'(\$\d[\d\.]*)\s*,\s*(?=\$\d)', r'\1 – ', t)
+        t_new, n2 = re.subn(r'(\$\d[\d\.]*)\s+(?:y|e)\s+(?=\$\d)', r'\1 – ', t_new, flags=re.I)
+        t = t_new
+        if n1 + n2 == 0:
+            break
+
+    return t.strip()
 
 def split_text_and_viz(respuesta_texto: str):
+    """Devuelve (texto_sin_viz, lista_instrucciones)."""
     text = respuesta_texto
     instr = []
     for m in VIZ_PATT.finditer(respuesta_texto):
@@ -446,6 +353,13 @@ def split_text_and_viz(respuesta_texto: str):
         parts = [p.strip(" `*-•").strip() for p in body.split("|")]
         if len(parts) >= 3:
             instr.append(("viz", parts))
+        text = text.replace(m.group(0), "")
+    for m in ALT_PATT.finditer(respuesta_texto):
+        kind = m.group(1).lower()
+        hoja = m.group(2)
+        body = m.group(3).strip().strip("`").lstrip("-*• ").strip()
+        parts = [p.strip(" `*-•").strip() for p in body.split("|")]
+        instr.append((kind, hoja, parts))
         text = text.replace(m.group(0), "")
     return text.strip(), instr
 
@@ -461,17 +375,37 @@ def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo):
         st.error(f"Error generando visualización en '{hoja}': {e}")
 
 def render_viz_instructions(instr_list, data_dict):
+    """Ejecuta la primera instrucción que haga match con alguna hoja."""
     if not instr_list: return False
     for item in instr_list:
-        _tipo, parts = item
-        tipo = parts[0].lower()
-        cat_raw, val_raw = parts[1], parts[2]
-        titulo = parts[3] if len(parts) >= 4 else None
-        for hoja, df in data_dict.items():
-            if find_col(df, cat_raw) and find_col(df, val_raw):
-                if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo); return True
-                if tipo == "torta":    _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo); return True
-                mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw), titulo or f"Tabla ({hoja})"); return True
+        if item[0] == "viz":
+            _tipo, parts = item
+            tipo = parts[0].lower()
+            cat_raw, val_raw = parts[1], parts[2]
+            titulo = parts[3] if len(parts) >= 4 else None
+            for hoja, df in data_dict.items():
+                if find_col(df, cat_raw) and find_col(df, val_raw):
+                    if tipo == "barras":   _safe_plot(mostrar_grafico_barras, hoja, df, cat_raw, val_raw, titulo); return True
+                    if tipo == "torta":    _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo); return True
+                    _safe_plot(lambda d,a,b,t: mostrar_tabla(d,a,b,t or f"Tabla ({hoja})"), hoja, df, cat_raw, val_raw, titulo); return True
+        else:
+            kind, hoja_sel, parts = item
+            if kind in ("grafico_torta","grafico_barras"):
+                if len(parts) != 3: continue
+                cat_raw, val_raw, title = parts
+                if hoja_sel and hoja_sel in data_dict:
+                    _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
+                              hoja_sel, data_dict[hoja_sel], cat_raw, val_raw, title); return True
+                for hoja, df in data_dict.items():
+                    if find_col(df, cat_raw) and find_col(df, val_raw):
+                        _safe_plot(mostrar_grafico_torta if kind=="grafico_torta" else mostrar_grafico_barras,
+                                  hoja, df, cat_raw, val_raw, title); return True
+            else:
+                if len(parts) not in (2,3): continue
+                cat_raw, val_raw = parts[0], parts[1]; title = parts[2] if len(parts)==3 else None
+                for hoja, df in data_dict.items():
+                    if find_col(df, cat_raw) and find_col(df, val_raw):
+                        mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw), title); return True
     return False
 
 # ---------------------------
@@ -493,10 +427,21 @@ def plan_from_llm(pregunta: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     system = "Eres un controller financiero experto. Sé concreto y útil."
     prompt = f"""
 Devuelve SOLO un JSON con el mejor plan de visualización si corresponde:
-{{ "action":"chart|table|text", "sheet":"", "category_col":"", "value_col":"", "chart":"barras|torta|auto", "title":"" }}
-Reglas: usa nombres EXACTOS del esquema (insensible a mayúsculas). Si no procede, "action":"text".
+{{
+  "action": "table" | "chart" | "text",
+  "sheet": "<nombre hoja o vacío>",
+  "category_col": "<cat>",
+  "value_col": "<val>",
+  "chart": "barras" | "torta" | "linea" | "auto",
+  "title": "<título>"
+}}
+Reglas:
+- Usa nombres EXACTOS del esquema (insensible a mayúsculas).
+- Si la categoría es un identificador (patente/folio/doc/factura/oc), prefiere "table".
+- Si no se indica tipo de gráfico, usa "auto".
 ESQUEMA:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
+
 PREGUNTA:
 {pregunta}
 """
@@ -504,55 +449,82 @@ PREGUNTA:
     raw = ask_gpt(messages).strip()
     m = re.search(r"\{.*\}", raw, flags=re.S)
     if not m: return {}
-    try: return json.loads(m.group(0))
-    except Exception: return {}
+    try:
+        plan = json.loads(m.group(0)); return plan if isinstance(plan, dict) else {}
+    except Exception:
+        return {}
 
 def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
-    action = (plan or {}).get("action")
-    if action not in ("table","chart"): return False
+    action = plan.get("action")
+    if action not in ("table","chart","text"): return False
+    if action == "text": return False
     sheet = plan.get("sheet") or ""
     cat = plan.get("category_col") or ""
     val = plan.get("value_col") or ""
     chart = (plan.get("chart") or "auto").lower()
     title = plan.get("title") or None
+
     hojas = [sheet] if sheet in data else list(data.keys())
     for h in hojas:
         df = data[h]
         if df is None or df.empty: continue
         cat_real = find_col(df, cat) if cat else None
         val_real = find_col(df, val) if val else None
+        if not val_real:
+            for c in df.columns:
+                if any(k in _norm(c) for k in ["monto","importe","neto","total","facturacion","ingreso","venta","principal"]):
+                    val_real = c; break
+        if not cat_real:
+            for c in df.columns:
+                if any(k in _norm(c) for k in ["patente","cliente","tipo","estado","proceso","servicio","vehiculo","unidad","mes","fecha"]):
+                    cat_real = c; break
         if not (cat_real and val_real): continue
-        if action == "table":
-            mostrar_tabla(df, cat_real, val_real, title); return True
-        if chart in ("auto","barras"):
-            mostrar_grafico_barras(df, cat_real, val_real, title); return True
-        if chart == "torta":
-            mostrar_grafico_torta(df, cat_real, val_real, title); return True
+
+        df_fil = df.copy()
+
+        if action == "chart" and chart == "auto":
+            chart = _choose_chart_auto(df_fil, cat_real, val_real)
+
+        if action == "table" or chart == "table":
+            mostrar_tabla(df_fil, cat_real, val_real, title)
+            st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":"tabla"}
+            return True
+
+        if chart == "barras":   mostrar_grafico_barras(df_fil, cat_real, val_real, title)
+        elif chart == "torta":  mostrar_grafico_torta(df_fil, cat_real, val_real, title)
+        elif chart == "linea":  mostrar_grafico_barras(df_fil, cat_real, val_real, title)  # fallback
+        else:                   mostrar_grafico_barras(df_fil, cat_real, val_real, title)
+
+        st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type":f"chart:{chart}"}
+        return True
     return False
 
 # ---------------------------
-# IA – PROMPTS
+# IA – PROMPTS ESTRICTOS
 # ---------------------------
 def make_system_prompt():
     return (
         "Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
-        "Responde SIEMPRE con estilo ejecutivo + analítico y basándote EXCLUSIVAMENTE en la planilla."
+        "Responde SIEMPRE con texto claro en Markdown, sin bloques de código, sin tipografías especiales ni emojis. "
+        "Tu estilo combina: ejecutivo (conclusiones claras) + analítico (fundamentos y números). "
+        "Toda la respuesta debe basarse EXCLUSIVAMENTE en los datos entregados por la planilla; "
+        "si un dato no está, indica 'No disponible en planilla'. No uses conocimiento externo."
     )
 
 ANALYSIS_FORMAT = """
-Escribe SIEMPRE en este formato (usa '###' y bullets '- '):
+Escribe SIEMPRE en este formato (solo Markdown simple y guiones '-' en bullets):
 
 ### Resumen ejecutivo
 - 3 a 5 puntos clave con cifras redondeadas y contexto.
 
 ### Diagnóstico
-- Qué está bien / mal y por qué.
+- Qué está bien / mal y por qué (drivers por línea de negocio, clientes, estados, tiempos, etc.).
 
 ### Estimaciones y proyecciones
-- Proyección 3–6 meses (escenarios: optimista/base/conservador) con supuestos.
+- Proyección 3–6 meses con supuestos explícitos y tres escenarios: optimista, base y conservador.
 
 ### Recomendaciones de gestión
-- 5–8 acciones priorizadas (impacto y dificultad).
+- 5–8 acciones priorizadas (impacto estimado y dificultad operacional).
 
 ### Riesgos y alertas
 - 3–5 riesgos y mitigaciones.
@@ -560,7 +532,7 @@ Escribe SIEMPRE en este formato (usa '###' y bullets '- '):
 ### Próximos pasos
 - Dueños, plazos y métrica objetivo.
 
-Al final, si ayuda, añade UNA instrucción:
+Al final, si ayuda, añade UNA sola instrucción de visualización en alguna de estas formas (una línea):
 viz: barras|<categoria>|<valor>|<título opcional>
 viz: torta|<categoria>|<valor>|<título opcional>
 viz: tabla|<categoria>|<valor>|<título opcional>
@@ -571,7 +543,7 @@ def prompt_analisis_general(analisis_dict: dict) -> list:
         {"role":"system","content": make_system_prompt()},
         {"role":"user","content": f"""
 Con base en los siguientes KPIs calculados reales, realiza un ANÁLISIS PROFESIONAL siguiendo el formato obligatorio.
-No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos conservadoramente.
+No inventes datos fuera de lo entregado; si necesitas supuestos, decláralos de forma conservadora.
 
 KPIs:
 {json.dumps(analisis_dict, ensure_ascii=False, indent=2)}
@@ -589,7 +561,7 @@ def prompt_consulta_libre(pregunta: str, schema: dict) -> list:
         {"role":"system","content": make_system_prompt()},
         *historial_msgs,
         {"role":"user","content": f"""
-Contesta usando el esquema de datos; incluye SIEMPRE el formato completo y, si aplica, UNA instrucción de visualización.
+Contesta la siguiente pregunta usando el esquema de datos; SIEMPRE incluye el análisis completo del formato y, si aplica, UNA instrucción de visualización.
 Pregunta: {pregunta}
 
 Esquema (hojas, columnas y ejemplos):
@@ -660,7 +632,7 @@ elif st.session_state.menu_sel == "KPIs":
         c1.metric("Ingresos ($)", f"{int(round(kpis['ingresos'])):,}".replace(",", "."))
         c2.metric("Costos ($)",   f"{int(round(kpis['costos'])):,}".replace(",", "."))
         c3.metric("Margen ($)",   f"{int(round(kpis['margen'])):,}".replace(",", "."))
-        c4.metric("Margen %",     f"{(kpis.get('margen_pct') or 0):.1f}%")
+        c4.metric("Margen %",     f"{(kpis['margen_pct'] or 0):.1f}%")
         c5, c6, c7 = st.columns(3)
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
@@ -732,7 +704,7 @@ elif st.session_state.menu_sel == "KPIs":
         else:
             with c3d: st.info("No se detectaron fechas para tendencia mensual.")
 
-# ----------- Consulta IA (HTML plano en iframe + viz a la derecha) -----------
+# ----------- Consulta IA (texto a la izquierda, visual a la derecha) -----------
 elif st.session_state.menu_sel == "Consulta IA":
     data = st.session_state.data
     if not data:
@@ -741,14 +713,16 @@ elif st.session_state.menu_sel == "Consulta IA":
         st.markdown("### 🤖 Consulta")
         pregunta = st.text_area("Pregunta")
         c1b, c2b = st.columns(2)
+
         left, right = st.columns([0.58, 0.42])
 
         if c1b.button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
             raw = ask_gpt(prompt_analisis_general(analisis))
             texto, instr = split_text_and_viz(raw)
+            texto = prettify_answer(texto)
             with left:
-                render_ia_html_block(texto, height=620)
+                st.markdown(texto)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
@@ -761,8 +735,9 @@ elif st.session_state.menu_sel == "Consulta IA":
             schema = _build_schema(data)
             raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
             texto, instr = split_text_and_viz(raw)
+            texto = prettify_answer(texto)
             with left:
-                render_ia_html_block(texto, height=620)
+                st.markdown(texto)
             with right:
                 ok = render_viz_instructions(instr, data)
                 if not ok:
@@ -776,15 +751,11 @@ elif st.session_state.menu_sel == "Historial":
         for i, h in enumerate(st.session_state.historial[-20:], 1):
             st.markdown(f"**Q{i}:** {h['pregunta']}")
             st.markdown(f"**A{i}:**")
-            try:
-                parsed = json.loads(h["respuesta"])
-                st.json(parsed)
-            except Exception:
-                render_ia_html_block(h["respuesta"], height=520)
+            st.markdown(h["respuesta"])
     else:
         st.info("Aún no hay historial en esta sesión.")
 
-# ----------- Diagnóstico IA -----------
+# ----------- Diagnóstico IA (solo API) -----------
 elif st.session_state.menu_sel == "Diagnóstico IA":
     st.markdown("### 🔎 Diagnóstico de la IA (OpenAI)")
     st.caption("Verifica API Key, conexión, prueba mínima de chat y estado de créditos/cuota.")
@@ -805,4 +776,5 @@ elif st.session_state.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
 
