@@ -15,7 +15,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-roles-v2-tablefix"
+APP_BUILD = "build-2025-08-26-roles-v3-resumenfin"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -311,59 +311,37 @@ def _is_int_like(series: pd.Series) -> bool:
     except Exception:
         return False
 
-def _guess_role_for_column(df: pd.DataFrame, col: str) -> str:
-    name = str(col)
-    nname = _norm(name)
-
-    forced = ss.roles_forced.get((ss.current_sheet_for_roles or "", _norm(name)))
-    if forced: return forced
-
-    if DATE_PAT.search(nname):
-        return "date"
-
-    s = df[col]
-    dtype = str(s.dtype)
-
-    if PCT_PAT.search(nname):
-        return "percent"
-    if MONEY_PAT.search(nname):
-        return "money"
-    if ID_PAT.search(nname):
-        return "id"
-
-    if "datetime" in dtype or "date" in dtype:
-        return "date"
-
-    if pd.api.types.is_numeric_dtype(s):
-        uniq = _ratio_unique(s)
-        try:
-            mx = float(pd.to_numeric(s, errors="coerce").max())
-            mn = float(pd.to_numeric(s, errors="coerce").min())
-        except Exception:
-            mx, mn = np.nan, np.nan
-
-        if _is_int_like(s) and uniq > 0.80 and (mx > 10000 or (mx-mn) > 10000):
-            return "id"
-        if mx and mx >= 1000:
-            return "money"
-        if QTY_PAT.search(nname):
-            return "quantity"
-        if uniq < 0.20:
-            return "category"
-        return "quantity"
-    else:
-        if _ratio_unique(s) < 0.20 or CAT_HINT.search(nname):
-            return "category"
-        return "text"
-
 def detect_roles_for_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str,str]:
     ss.current_sheet_for_roles = sheet_name
     roles = {}
     for c in df.columns:
-        try:
-            roles[str(c)] = _guess_role_for_column(df, c)
-        except Exception:
-            roles[str(c)] = "unknown"
+        name = str(c); nname = _norm(name)
+        s = df[c]
+        if DATE_PAT.search(nname) or "datetime" in str(s.dtype) or "date" in str(s.dtype):
+            roles[name] = "date"; continue
+        if PCT_PAT.search(nname):
+            roles[name] = "percent"; continue
+        if MONEY_PAT.search(nname):
+            roles[name] = "money"; continue
+        if ID_PAT.search(nname):
+            roles[name] = "id"; continue
+        if pd.api.types.is_numeric_dtype(s):
+            uniq = _ratio_unique(s)
+            try:
+                mx = float(pd.to_numeric(s, errors="coerce").max())
+                mn = float(pd.to_numeric(s, errors="coerce").min())
+            except Exception:
+                mx, mn = np.nan, np.nan
+            if _is_int_like(s) and uniq > 0.80 and (mx > 10000 or (mx-mn) > 10000):
+                roles[name] = "id"
+            elif mx and mx >= 1000:
+                roles[name] = "money"
+            elif uniq < 0.20:
+                roles[name] = "category"
+            else:
+                roles[name] = "quantity"
+        else:
+            roles[name] = "category" if (_ratio_unique(s) < 0.20 or CAT_HINT.search(nname)) else "text"
     return roles
 
 def apply_dictionary_sheet(data: Dict[str, pd.DataFrame]):
@@ -534,7 +512,6 @@ def render_viz_instructions(instr_list, data_dict, prefer_table: bool=False):
                         _safe_plot(mostrar_grafico_barras_v3, hoja, df, cat_raw, val_raw, titulo); return True
                     if tipo == "torta":
                         _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo); return True
-                    # fallback tabla
                     mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw), titulo or f"Tabla ({hoja})"); return True
                 except Exception as e:
                     st.error(f"Error generando visualización en '{hoja}': {e}")
@@ -681,101 +658,45 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
             return False
     return False
 
-def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-    if not plan:
-        return {"ok": False, "msg": "Plan vacío."}
-
-    sheet = plan.get("sheet","") or ""
-    val_raw = plan.get("value_col","") or ""
-    cat_raw = plan.get("category_col","") or ""
-    op = (plan.get("op","sum") or "sum").lower()
-    filters = plan.get("filters", [])
-
-    hojas = [sheet] if sheet in data else list(data.keys())
-    for h in hojas:
-        df = data[h]
-        if df is None or df.empty: continue
-
-        roles = detect_roles_for_sheet(df, h)
-        val_col = find_col(df, val_raw)
-        if not val_col: continue
-
-        value_role = roles.get(val_col, "unknown")
-        # autocorrecciones
-        if value_role == "id" and op in {"sum","avg","max","min"}:
-            op = "count"
-        if value_role == "percent" and op in {"sum","max","min"}:
-            op = "avg"
-
-        dff = _apply_filters(df, filters)
-        vals = pd.to_numeric(dff[val_col], errors="coerce")
-
-        if cat_raw:
-            cat_col = find_col(dff, cat_raw)
-            if not cat_col:
-                continue
-            g = dff.assign(__v=vals).groupby(cat_col, dropna=False)["__v"]
-            if op == "avg":
-                s = g.mean()
-            elif op == "count":
-                s = g.count()
-            elif op == "max":
-                s = g.max()
-            elif op == "min":
-                s = g.min()
-            else:
-                s = g.sum()
-            s = s.sort_values(ascending=False)
-            total = float(pd.to_numeric(s, errors="coerce").sum()) if op!="count" else int(s.sum())
-            df_res = s.reset_index()
-            df_res.columns = [str(cat_col), str(val_col)]
-            return {
-                "ok": True, "msg": "", "sheet": h,
-                "value_col": val_col, "value_role": value_role,
-                "category_col": cat_col, "op": op,
-                "rows": int(len(dff)), "total": total,
-                "by_category": [{"categoria": str(k), "valor": float(v) if pd.notna(v) else 0.0}
-                                for k, v in s.items()],
-                "df_result": df_res
-            }
-        else:
-            if op == "avg":
-                total = float(vals.mean())
-            elif op == "count":
-                total = int(vals.count())
-            elif op == "max":
-                total = float(vals.max())
-            elif op == "min":
-                total = float(vals.min())
-            else:
-                total = float(vals.sum())
-            df_res = pd.DataFrame({str(val_col): [total], "TOTAL": ["TOTAL"]})[[ "TOTAL", str(val_col)]]
-            return {
-                "ok": True, "msg":"", "sheet": h,
-                "value_col": val_col, "value_role": value_role,
-                "category_col": "", "op": op,
-                "rows": int(len(dff)), "total": total,
-                "by_category": [],
-                "df_result": df_res
-            }
-
-    return {"ok": False, "msg": "No se encontraron columnas compatibles en las hojas."}
-
-# =======================
-# INSIGHTS
-# =======================
 def _fmt_pct(p):
     try: return f"{float(p)*100:.1f}%"
     except: return "—"
 
+def _fmt_number_general(x):
+    try:
+        return f"{int(round(float(x))):,}".replace(",", ".")
+    except:
+        return str(x)
+
+# ======= NUEVO: escoger mejor columna valor (prioriza money con mayor suma)
 def _guess_value_col(df: pd.DataFrame):
     roles = detect_roles_for_sheet(df, "tmp")
-    money_cols = [c for c,r in roles.items() if r=="money"]
-    if money_cols: return money_cols[0]
-    qty_cols = [c for c,r in roles.items() if r=="quantity"]
-    if qty_cols: return qty_cols[0]
-    num = df.select_dtypes(include=[np.number]).columns
-    return num[0] if len(num) else None
+
+    def best_sum(cols):
+        if not cols:
+            return None
+        sums = {}
+        for c in cols:
+            try:
+                s = pd.to_numeric(df[c], errors="coerce").sum()
+                sums[c] = float(0 if pd.isna(s) else s)
+            except Exception:
+                sums[c] = 0.0
+        return max(sums, key=lambda k: sums[k]) if sums else None
+
+    money_cols = [c for c, r in roles.items() if r == "money"]
+    pick = best_sum(money_cols)
+    if pick:
+        return pick
+
+    qty_cols = [c for c, r in roles.items() if r == "quantity"]
+    pick = best_sum(qty_cols)
+    if pick:
+        return pick
+
+    num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if roles.get(c) != "percent"]
+    pick = best_sum(num_cols)
+    return pick
 
 def _guess_process_col(df: pd.DataFrame):
     for name in ["proceso","tipo de proceso","tipo","servicio","servicios"]:
@@ -792,41 +713,171 @@ def _guess_date_col(df: pd.DataFrame):
         if c: return c
     return None
 
+# ======= NUEVO: helpers para resumen financiero y gráficos
+def _sheet_name_matches_finanzas(name: str) -> bool:
+    n = _norm(name)
+    return any(k in n for k in ["finanz", "finance"])
+
+def _values_contain_keywords(series: pd.Series, keywords: List[str]) -> bool:
+    try:
+        vals = " ".join([str(x) for x in series.dropna().astype(str).unique()[:200]]).lower()
+        return any(k in vals for k in keywords)
+    except Exception:
+        return False
+
+def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
+    """Muestra la tabla agrupada de Ingresos/Egresos si está en 'FINANZAS'; si no, fallback a Ingresos/Costos/Margen."""
+    # 1) buscar hoja FINANZAS-like
+    target = None
+    for h, df in data.items():
+        if df is None or df.empty: continue
+        if _sheet_name_matches_finanzas(h):
+            target = (h, df); break
+
+    # 2) si hay FINANZAS, buscar (cat con 'ingreso/egreso/costo', money col)
+    if target:
+        h, df = target
+        roles = detect_roles_for_sheet(df, h)
+        money_cols = [c for c,r in roles.items() if r=="money"]
+        cat_cols   = [c for c,r in roles.items() if r=="category"]
+
+        best = None
+        for cat in cat_cols:
+            if _values_contain_keywords(df[cat], ["ingreso","egreso","costo","costos"]):
+                # elige money col de mayor suma
+                pick = None; pick_sum = -1
+                for mcol in money_cols:
+                    s = pd.to_numeric(df[mcol], errors="coerce").sum()
+                    if s > pick_sum:
+                        pick_sum = s; pick = mcol
+                if pick:
+                    best = (cat, pick); break
+
+        if best:
+            cat, val = best
+            mostrar_tabla(df, cat, val, "Ingresos y Egresos (FINANZAS)")
+            return
+
+    # 3) Fallback a KPIs simples
+    k = {}
+    try:
+        k = analizar_datos_taller(data, "") or {}
+    except Exception:
+        pass
+    ingresos = float(k.get("ingresos") or 0)
+    costos   = float(k.get("costos") or 0)
+    margen   = ingresos - costos
+    df_tab = pd.DataFrame({
+        "Concepto": ["Ingresos","Costos","Margen"],
+        "Monto": [ingresos, costos, margen]
+    })
+    df_tab["Monto"] = df_tab["Monto"].apply(_fmt_pesos)
+    st.markdown("### 📊 Resumen financiero")
+    st.dataframe(df_tab, use_container_width=True)
+
+def find_best_pair_money(
+    data: Dict[str, pd.DataFrame],
+    category_match: callable
+) -> Tuple[str, pd.DataFrame, str, str]:
+    """Encuentra (hoja, df, categoria, value_money) max suma donde category_match(nombre_col) sea True."""
+    best = None
+    for h, df in data.items():
+        if df is None or df.empty: continue
+        roles = detect_roles_for_sheet(df, h)
+        money_cols = [c for c,r in roles.items() if r=="money"]
+        if not money_cols: continue
+        cat_cols = [c for c,r in roles.items() if r=="category"]
+        matches = [c for c in cat_cols if category_match(_norm(c))]
+        for cat in matches:
+            # escoger money col con mayor suma
+            pick = None; pick_sum = -1
+            for mcol in money_cols:
+                s = pd.to_numeric(df[mcol], errors="coerce").sum()
+                if s > pick_sum:
+                    pick_sum = s; pick = mcol
+            if pick is None: 
+                continue
+            if best is None or pick_sum > best[-1]:
+                best = (h, df, cat, pick, pick_sum)
+    if best:
+        h, df, cat, val, _ = best
+        return h, df, cat, val
+    return None, None, None, None
+
+def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
+    # Cliente
+    def is_tipo_cliente(colname_norm: str) -> bool:
+        return (("cliente" in colname_norm) and (("tipo" in colname_norm) or ("segment" in colname_norm)))
+    h1, df1, cat1, val1 = find_best_pair_money(data, is_tipo_cliente)
+
+    # Proceso
+    def is_proceso(colname_norm: str) -> bool:
+        return (("proceso" in colname_norm) or ("servicio" in colname_norm))
+    h2, df2, cat2, val2 = find_best_pair_money(data, is_proceso)
+
+    c1, c2 = st.columns(2)
+    if h1 and df1 is not None:
+        with c1:
+            mostrar_grafico_barras_v3(df1, cat1, val1, "Monto Principal Neto por Tipo de Cliente")
+    else:
+        with c1:
+            st.info("No encontré una combinación dinero + 'Tipo de cliente' para graficar.")
+
+    if h2 and df2 is not None:
+        with c2:
+            mostrar_grafico_barras_v3(df2, cat2, val2, "Monto Principal Neto por Proceso")
+    else:
+        with c2:
+            st.info("No encontré una combinación dinero + 'Proceso' para graficar.")
+
+# =======================
+# INSIGHTS
+# =======================
 def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
-    kpis = {}
     try:
         kpis = analizar_datos_taller(data, "") or {}
     except Exception:
         kpis = {}
 
-    hoja_proc, by_proc_df = None, None
+    # escoger mejor hoja/categoria/valor priorizando MONEY
+    best = None
     for h, df in data.items():
-        if df is None or df.empty: 
+        if df is None or df.empty:
             continue
-        vcol = _guess_value_col(df)
+        roles = detect_roles_for_sheet(df, h)
         pcol = _guess_process_col(df)
-        if vcol and pcol:
-            hoja_proc, by_proc_df = h, df[[pcol, vcol]].copy()
-            break
+        vcol = _guess_value_col(df)
+        if not pcol or not vcol:
+            continue
+        role = roles.get(vcol, "unknown")
+        if role in ("percent", "id"):
+            continue
+        total = float(pd.to_numeric(df[vcol], errors="coerce").sum())
+        if best is None or total > best["total"]:
+            best = {"sheet": h, "pcol": pcol, "vcol": vcol, "role": role, "total": total}
 
-    by_process = []
-    conc_share = None
-    if by_proc_df is not None:
-        pcol = find_col(by_proc_df, _guess_process_col(by_proc_df))
-        vcol = find_col(by_proc_df, _guess_value_col(by_proc_df))
-        vals = pd.to_numeric(by_proc_df[vcol], errors="coerce")
-        s = (by_proc_df.assign(__v=vals).groupby(pcol, dropna=False)["__v"]
+    by_process, conc_share = [], None
+    if best:
+        h, pcol, vcol, role = best["sheet"], best["pcol"], best["vcol"], best["role"]
+        d = data[h]
+        vals = pd.to_numeric(d[vcol], errors="coerce")
+        s = (d.assign(__v=vals).groupby(pcol, dropna=False)["__v"]
              .sum().sort_values(ascending=False))
         total = float(s.sum()) if len(s) else 0.0
-        by_process = [{"proceso": str(k), "monto": float(v) if pd.notna(v) else 0.0} for k, v in s.items()]
+        by_process = [{"proceso": str(k), "monto": float(v) if pd.notna(v) else 0.0}
+                      for k, v in s.items()]
         if total > 0 and len(by_process) >= 1:
             conc_share = by_process[0]["monto"] / total
+        by_process_role = role
+        sheet_for_process = h
+    else:
+        by_process_role = "unknown"
+        sheet_for_process = None
 
     ingresos = float(kpis.get("ingresos") or 0)
     costos   = float(kpis.get("costos") or 0)
     margen   = ingresos - costos
-    margen_pct = None
-    if ingresos > 0: margen_pct = margen / ingresos
+    margen_pct = (margen / ingresos) if ingresos > 0 else None
 
     lead_time = kpis.get("lead_time_mediano_dias")
     conv_pct  = kpis.get("conversion_pct")
@@ -835,14 +886,13 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     if conc_share is not None and conc_share >= 0.60:
         alerts.append(f"Alta concentración: el proceso líder representa {_fmt_pct(conc_share)} del total.")
         if len(by_process) >= 2:
-            opps.append(f"Diversificar: crecer en '{by_process[1]['proceso']}' y '{by_process[min(2,len(by_process))-1]['proceso']}' para bajar dependencia.")
+            opps.append(f"Diversificar: crecer en '{by_process[1]['proceso']}' para bajar dependencia.")
 
     margen_target = 0.10
-    if margen_pct is not None and margen_pct < margen_target:
-        if (1 - margen_target) > 0 and ingresos > 0:
-            ventas_necesarias = costos / (1 - margen_target)
-            uplift = max(0.0, ventas_necesarias/ingresos - 1.0)
-            opps.append(f"Ajuste de precios: se requiere aproximadamente {_fmt_pct(uplift)} para llegar a un margen de {_fmt_pct(margen_target)}.")
+    if margen_pct is not None and margen_pct < margen_target and ingresos > 0:
+        ventas_nec = costos / (1 - margen_target)
+        uplift = max(0.0, ventas_nec / ingresos - 1.0)
+        opps.append(f"Ajuste de precios: se requiere aproximadamente {_fmt_pct(uplift)} para llegar a un margen de {_fmt_pct(margen_target)}.")
         alerts.append(f"Margen bajo: actual {_fmt_pct(margen_pct)} sobre ingresos de {_fmt_pesos(ingresos)}.")
 
     if lead_time is not None and lead_time > 4.5:
@@ -851,7 +901,7 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
 
     if conv_pct is not None and conv_pct < 70:
         alerts.append(f"Tasa de conversión baja ({conv_pct:.1f}%).")
-        opps.append("Refinar proceso comercial: priorización de leads y guías de precios para subir 5–10 pp la conversión.")
+        opps.append("Refinar proceso comercial: subir 5–10 pp la conversión.")
 
     base = ingresos
     optim_uplift = 0.05
@@ -862,19 +912,14 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "kpis": kpis,
         "by_process": by_process,
+        "by_process_role": by_process_role,
         "process_concentration": conc_share,
         "alerts": alerts,
         "opportunities": opps,
         "targets": {"margin_pct": margen_target},
         "projection_6m": proj,
-        "sheet_for_process": hoja_proc
+        "sheet_for_process": sheet_for_process
     }
-
-def _fmt_number_general(x):
-    try:
-        return f"{int(round(float(x))):,}".replace(",", ".")
-    except:
-        return str(x)
 
 def _fmt_list_top(by_category, top=10, role="unknown", op="sum"):
     def _fmt(v):
@@ -925,7 +970,7 @@ def build_verified_summary(facts: dict) -> str:
     encabezado = "### Resumen ejecutivo\n"
     if cat and facts.get("by_category"):
         lines = [
-            f"- {val.title()} ({op.upper()}) por **{cat}**: total {total} (sobre {rows} filas).",
+            f"- {val.title()} ({op.UPPER()}): total {total} por **{cat}** (sobre {rows} filas).",
             "- Detalle por categoría:",
             _fmt_list_top(facts.get("by_category", []), top=10, role=role, op=op)
         ]
@@ -939,9 +984,23 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     costos   = float(k.get("costos") or 0)
     margen   = ingresos - costos
     margen_pct = (margen/ingresos) if ingresos>0 else None
+
     bp = ins.get("by_process", [])
+    bp_role = ins.get("by_process_role", "unknown")
     proj = ins.get("projection_6m", {})
     tgt = ins.get("targets", {}).get("margin_pct", 0.10)
+
+    def _fmt_byrole(v):
+        if bp_role == "money":
+            return _fmt_pesos(v)
+        if bp_role == "percent":
+            try:
+                fv = float(v)
+                if 0 <= fv <= 1: fv *= 100
+                return f"{fv:.1f}%"
+            except:
+                return str(v)
+        return _fmt_number_general(v)
 
     secciones = []
     lines = ["### Diagnóstico basado en datos"]
@@ -949,10 +1008,11 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
         lines.append(f"- Ingresos últimos datos: {_fmt_pesos(ingresos)}; costos: {_fmt_pesos(costos)}; margen: {_fmt_pesos(margen)} ({_fmt_pct(margen_pct) if margen_pct is not None else '—'}).")
     if bp:
         top = bp[0]; share = ins.get("process_concentration")
-        lines.append(f"- Proceso líder: **{top['proceso']}** con {_fmt_pesos(top['monto'])}{f' ({_fmt_pct(share)})' if share is not None else ''}.")
+        lines.append(f"- Proceso líder: **{top['proceso']}** con {_fmt_byrole(top['monto'])}{f' ({_fmt_pct(share)})' if share is not None else ''}.")
         if len(bp) > 1:
             snd = bp[1]
-            lines.append(f"- Siguiente(s): {snd['proceso']} {_fmt_pesos(snd['monto'])}" + (f"; {bp[2]['proceso']} {_fmt_pesos(bp[2]['monto'])}" if len(bp)>2 else "") + ".")
+            extra = f"; {bp[2]['proceso']} {_fmt_byrole(bp[2]['monto'])}" if len(bp) > 2 else ""
+            lines.append(f"- Siguiente(s): {snd['proceso']} {_fmt_byrole(snd['monto'])}{extra}.")
     for a in ins.get("alerts", []):
         lines.append(f"- ⚠️ {a}")
     secciones.append("\n".join(lines))
@@ -961,20 +1021,17 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     if margen_pct is not None and margen_pct < tgt and ingresos>0:
         ventas_necesarias = costos/(1-tgt)
         uplift = max(0.0, ventas_necesarias/ingresos - 1.0)
-        recs.append(f"**Ajuste de precios**: subir listas en promedio **{_fmt_pct(uplift)}** en servicios con mayor demanda (p. ej. {bp[0]['proceso'] if bp else 'proceso líder'}) para alcanzar un margen objetivo de **{_fmt_pct(tgt)}**.")
+        recs.append(f"**Ajuste de precios**: subir listas en promedio **{_fmt_pct(uplift)}** para alcanzar un margen objetivo de **{_fmt_pct(tgt)}**.")
     if ins.get("process_concentration") and ins["process_concentration"]>=0.60 and len(bp)>=2:
-        recs.append(f"**Diversificación de mix**: diseñar campaña para **migrar 5–10 pp** de demanda desde **{bp[0]['proceso']}** hacia **{bp[1]['proceso']}** (paquetes, descuentos por combo, cross-sell).")
+        recs.append(f"**Diversificación de mix**: mover 5–10 pp desde **{bp[0]['proceso']}** hacia **{bp[1]['proceso']}**.")
     lt = k.get("lead_time_mediano_dias")
     if lt and lt>4.5:
-        recs.append("**Reducción de lead time**: implementar checklists de recepción y preasignación de materiales para bajar **1 día** el mediano (ganancia de capacidad ~**+33%**).")
+        recs.append("**Operaciones**: bajar 1 día el lead time (capacidad ~+33%).")
     conv = k.get("conversion_pct")
     if conv and conv<75:
-        recs.append(f"**Playbook comercial**: guías de precio y cierre para subir conversión a **{max(75, round(conv+5))}%**; enfocar en top 3 procesos por ingreso.")
+        recs.append("**Comercial**: playbook de cierre para subir 5–10 pp la conversión.")
     if costos>0:
-        recs.append("**Compras y materiales**: renegociar insumos de alto uso (pinturas, abrasivos) con objetivo de **-3%** en costo promedio por servicio.")
-    recs.append("**Re-trabajos**: medir y reducir devoluciones/garantías; cada -1 pp en retrabajos mejora el margen efectivo y libera capacidad.")
-    recs.append("**Pricing por capacidad**: recargo del 5–8% en semanas pico; descuento del 3–5% en valle para suavizar carga y sostener ticket.")
-    recs.append("**Tablero semanal**: ingresos, margen %, lead time y conversión por proceso; semáforos con metas y responsables.")
+        recs.append("**Compras**: renegociar insumos clave (objetivo -3% en costo promedio).")
 
     secciones.append("### Recomendaciones de gestión (priorizadas)\n" + "\n".join([f"{i+1}. {r}" for i,r in enumerate(recs)]))
 
@@ -984,17 +1041,16 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
         cons = proj.get("cons", ingresos)
         secciones.append(
             "### Estimaciones y proyecciones (6 meses)\n"
-            f"- **Base**: mantener mix y precios actuales ⇒ {_fmt_pesos(base)} / mes aprox.\n"
-            f"- **Optimista**: mejoras de precio + capacidad ⇒ {_fmt_pesos(optim)} / mes.\n"
-            f"- **Conservador**: presión de costos o demanda ⇒ {_fmt_pesos(cons)} / mes."
+            f"- **Base**: {_fmt_pesos(base)} / mes.\n"
+            f"- **Optimista**: {_fmt_pesos(optim)} / mes.\n"
+            f"- **Conservador**: {_fmt_pesos(cons)} / mes."
         )
 
     secciones.append(
         "### Próximos pasos\n"
-        "- Owner Finanzas: propuesta de ajuste de precios y simulación de margen (1 semana).\n"
-        "- Owner Operaciones: plan de reducción de lead time en procesos cuello de botella (2 semanas).\n"
-        "- Owner Comercial: campaña para rotar demanda a procesos con mejor margen (2 semanas).\n"
-        "- Review quincenal en tablero con KPIs y decisiones."
+        "- Finanzas: simulación de margen y propuesta de precios (1 semana).\n"
+        "- Operaciones: plan de reducción de lead time (2 semanas).\n"
+        "- Comercial: campaña de mix (2 semanas)."
     )
     return "\n\n".join(secciones)
 
@@ -1175,7 +1231,13 @@ elif ss.menu_sel == "Consulta IA":
             texto_llm, instr = split_text_and_viz(raw)
             texto = texto_llm + "\n\n" + texto_extra
             with left:
-                render_ia_html_block(texto, height=620)
+                render_ia_html_block(texto, height=520)
+                st.markdown("---")
+                # NUEVO: Tabla financiera + 2 gráficos (cliente / proceso)
+                render_finance_table(data)
+                st.markdown("### Distribución por cliente y procesos")
+                render_cliente_y_proceso(data)
+
             with right:
                 ok = False
                 try:
@@ -1186,7 +1248,6 @@ elif ss.menu_sel == "Consulta IA":
                     try:
                         schema = _build_schema(data)
                         plan = plan_from_llm("Sugerir mejor visual", schema)
-                        # Fallback: forzar tabla también aquí
                         if plan.get("action") in ("table","chart"):
                             execute_plan({"action":"table",
                                           "sheet": plan.get("sheet",""),
@@ -1230,7 +1291,13 @@ elif ss.menu_sel == "Consulta IA":
                 ins = derive_global_insights(data)
                 texto = build_verified_summary(facts) + "\n\n" + compose_actionable_text(ins)
                 with left:
-                    render_ia_html_block(texto, height=620)
+                    render_ia_html_block(texto, height=520)
+                    st.markdown("---")
+                    # NUEVO: también puedes querer ver el mini tablero en respuestas libres (opcional)
+                    render_finance_table(data)
+                    st.markdown("### Distribución por cliente y procesos")
+                    render_cliente_y_proceso(data)
+
                 with right:
                     df_res = facts["df_result"]
                     if facts.get("category_col"):
@@ -1245,7 +1312,6 @@ elif ss.menu_sel == "Consulta IA":
                             st.error(f"Error graficando: {e}")
                             st.dataframe(df_res, use_container_width=True)
                     else:
-                        # métrica simple
                         role = facts.get("value_role","unknown")
                         valtxt = (_fmt_pesos(facts['total']) if role=="money"
                                   else (_fmt_number_general(facts['total']) if facts['op']=="count" or role in ("id","quantity")
