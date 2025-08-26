@@ -15,7 +15,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-verified-1"
+APP_BUILD = "build-2025-08-26-verified-1a"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -144,6 +144,21 @@ CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 
+# --- NUEVO: limpia artefactos de moneda ($) incrustados y decimales espurios ---
+ARTIFACT_DOLLAR_BETWEEN_GROUPS = re.compile(r'(?<=[\.,])\$(?=\d{3}\b)')
+def fix_peso_artifacts(t: str) -> str:
+    if not t:
+        return t
+    # $ entre grupos de miles -> eliminar el $ intermedio
+    t = ARTIFACT_DOLLAR_BETWEEN_GROUPS.sub('', t)
+    # $$ -> $
+    t = re.sub(r'\$\s*\$+', '$', t)
+    # $ 1.000 -> $1.000
+    t = re.sub(r'\$\s+(?=\d)', '$', t)
+    # $2.162.234.65 -> $2.162.234 (CLP sin decimales)
+    t = re.sub(r'\$(\d{1,3}(?:[.,]\d{3})+)[.,]\d{1,2}\b', r'$\1', t)
+    return t
+
 def _to_clp(i: int) -> str:
     return f"${i:,}".replace(",", ".")
 
@@ -182,8 +197,8 @@ def prettify_answer(text: str) -> str:
     t = CURRENCY_COMMA_RE.sub(lambda m: _to_clp(int(m.group(1).replace(',',''))), t)
     t = CURRENCY_DOT_RE.sub(  lambda m: _to_clp(int(m.group(1).replace('.',''))), t)
 
-    t = re.sub(r'\$\s*\$+', '$', t)      # $$ → $
-    t = re.sub(r'\$\s+(?=\d)', '$', t)   # $ 1.000 → $1.000
+    # Limpieza final de artefactos de moneda
+    t = fix_peso_artifacts(t)
     t = re.sub(r':(?=\S)', ': ', t)
     t = re.sub(r',(?=\S)', ', ', t)
     return t.strip()
@@ -199,7 +214,8 @@ def sanitize_text_for_html(s: str) -> str:
     t = re.sub(r'\\\((.*?)\\\)', r'\1', t, flags=re.S)
     t = re.sub(r'\\\[(.*?)\\\]', r'\1', t, flags=re.S)
     t = re.sub(r'\$\$(.*?)\$\$', r'\1', t, flags=re.S)
-    t = re.sub(r'\$\s*\$+', '$', t)
+    # Limpieza de artefactos CLP
+    t = fix_peso_artifacts(t)
     t = t.replace("•", "\n- ")
     t = re.sub(r'[ \t]+', ' ', t); t = re.sub(r'\n\s+','\n', t)
     return t.strip()
@@ -979,4 +995,3 @@ elif ss.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
-
