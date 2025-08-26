@@ -15,7 +15,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-v3"
+APP_BUILD = "build-2025-08-26-verified-1"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -151,7 +151,7 @@ def prettify_answer(text: str) -> str:
     """Limpia texto y normaliza montos (CLP). Sin reglas que separen palabras."""
     if not text: return text
     t = unicodedata.normalize("NFKC", text)
-    t = unescape(t)  # si venía &#36;, &nbsp;, etc., lo decodificamos primero
+    t = unescape(t)  # decodifica entidades si venían
     t = re.sub(r'<[^>]+>', '', t)
     t = INVISIBLES_RE.sub('', t)
     t = ALL_SPACES_RE.sub(' ', t)
@@ -192,7 +192,7 @@ def sanitize_text_for_html(s: str) -> str:
     """Neutraliza LaTeX y deja $ normal (no entidades)."""
     if not s: return ""
     t = unicodedata.normalize("NFKC", s)
-    t = unescape(t)  # por si vienen entidades numéricas/HTML
+    t = unescape(t)
     t = re.sub(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]', '', t)
     t = re.sub(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]', ' ', t)
     # neutraliza LaTeX
@@ -426,7 +426,7 @@ def render_viz_instructions(instr_list, data_dict):
     return False
 
 # =======================
-# PLANNER (fallback cuando no viene 'viz:')
+# PLANNER (visual) y EXEC
 # =======================
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     schema = {}
@@ -500,7 +500,210 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
     return False
 
 # =======================
-# PROMPTS IA
+# PLANNER DE CÓMPUTO (VERIFICADO)
+# =======================
+def plan_compute_from_llm(pregunta: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    system = ("Eres un planificador de CÓMPUTO financiero. Devuelve SOLO JSON. "
+              "NUNCA inventes columnas. Si la métrica es monetaria, usa op='sum' por defecto.")
+    prompt = f"""
+Devuelve SOLO este JSON (sin texto adicional):
+{{
+  "sheet": "<nombre_hoja_o_vacio_para_auto>",
+  "value_col": "<columna_de_valor>",
+  "category_col": "<columna_categoria_o_vacio_si_no_aplica>",
+  "op": "sum|avg|count|max|min",
+  "filters": [{{"col":"<col>","op":"eq|contains|gte|lte","val":"<valor>"}}]
+}}
+
+Reglas:
+- Si el usuario pide "por X", llena category_col con X y AGREGA TODOS los X (no solo el primero).
+- Si no hay "por", deja category_col vacío y calcula el TOTAL.
+- No inventes nombres: usa EXACTOS del esquema (insensible a mayúsculas).
+- Si dudas de la hoja, deja "sheet": "" para que el sistema decida.
+
+ESQUEMA:
+{json.dumps(schema, ensure_ascii=False, indent=2)}
+
+PREGUNTA:
+{pregunta}
+"""
+    raw = ask_gpt([{"role":"system","content":system},
+                   {"role":"user","content":prompt}]).strip()
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+def _apply_filters(df: pd.DataFrame, filters: List[Dict[str,str]]) -> pd.DataFrame:
+    if not filters:
+        return df
+    out = df.copy()
+    for f in filters:
+        col = find_col(out, f.get("col",""))
+        if not col:
+            continue
+        op  = (f.get("op","eq") or "eq").lower()
+        val = str(f.get("val",""))
+        if op == "eq":
+            out = out[out[col].astype(str).str.lower() == val.lower()]
+        elif op == "contains":
+            out = out[out[col].astype(str).str.contains(val, case=False, na=False)]
+        elif op == "gte":
+            out = out[pd.to_numeric(out[col], errors="coerce") >= pd.to_numeric(val, errors="coerce")]
+        elif op == "lte":
+            out = out[pd.to_numeric(out[col], errors="coerce") <= pd.to_numeric(val, errors="coerce")]
+    return out
+
+def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Devuelve:
+    {
+      "ok": True/False, "msg": "...",
+      "sheet": str, "value_col": str, "category_col": str, "op": str,
+      "rows": int, "total": float,
+      "by_category": [{"categoria": "...", "valor": float}, ...],  # si category_col != ""
+      "df_result": DataFrame
+    }
+    """
+    if not plan:
+        return {"ok": False, "msg": "Plan vacío."}
+
+    sheet = plan.get("sheet","") or ""
+    val_raw = plan.get("value_col","") or ""
+    cat_raw = plan.get("category_col","") or ""
+    op = (plan.get("op","sum") or "sum").lower()
+    filters = plan.get("filters", [])
+
+    hojas = [sheet] if sheet in data else list(data.keys())
+    for h in hojas:
+        df = data[h]
+        if df is None or df.empty:
+            continue
+        val_col = find_col(df, val_raw)
+        if not val_col:
+            continue
+        dff = _apply_filters(df, filters)
+        vals = pd.to_numeric(dff[val_col], errors="coerce")
+
+        if cat_raw:
+            cat_col = find_col(dff, cat_raw)
+            if not cat_col:
+                continue
+            g = dff.assign(__v=vals).groupby(cat_col, dropna=False)["__v"]
+            if op == "avg":
+                s = g.mean()
+            elif op == "count":
+                s = g.count()
+            elif op == "max":
+                s = g.max()
+            elif op == "min":
+                s = g.min()
+            else:
+                s = g.sum()
+            s = s.sort_values(ascending=False)
+            total = float(pd.to_numeric(s, errors="coerce").sum())
+            df_res = s.reset_index()
+            df_res.columns = [str(cat_col), str(val_col)]
+            return {
+                "ok": True, "msg": "", "sheet": h,
+                "value_col": val_col, "category_col": cat_col, "op": op,
+                "rows": int(len(dff)), "total": total,
+                "by_category": [{"categoria": str(k), "valor": float(v) if pd.notna(v) else 0.0}
+                                for k, v in s.items()],
+                "df_result": df_res
+            }
+        else:
+            # TOTAL simple
+            if op == "avg":
+                total = float(vals.mean())
+            elif op == "count":
+                total = int(vals.count())
+            elif op == "max":
+                total = float(vals.max())
+            elif op == "min":
+                total = float(vals.min())
+            else:
+                total = float(vals.sum())
+            df_res = pd.DataFrame({str(val_col): [total], "TOTAL": ["TOTAL"]})[[ "TOTAL", str(val_col)]]
+            return {
+                "ok": True, "msg":"", "sheet": h,
+                "value_col": val_col, "category_col": "", "op": op,
+                "rows": int(len(dff)), "total": total,
+                "by_category": [],
+                "df_result": df_res
+            }
+
+    return {"ok": False, "msg": "No se encontraron columnas compatibles en las hojas."}
+
+# ===== Resumen verificado + secciones cualitativas (sin cifras nuevas) =====
+def _fmt_list_top(by_category, top=10):
+    out = []
+    for i, item in enumerate(by_category[:top], 1):
+        cat = str(item["categoria"])
+        val = _fmt_pesos(item["valor"])
+        out.append(f"- {cat}: {val}")
+    if len(by_category) > top:
+        out.append(f"- (… {len(by_category)-top} más)")
+    return "\n".join(out)
+
+def build_verified_summary(facts: dict) -> str:
+    val = facts.get("value_col","valor")
+    cat = facts.get("category_col","")
+    total = _fmt_pesos(facts.get("total",0))
+    rows = facts.get("rows",0)
+
+    encabezado = "### Resumen ejecutivo\n"
+    if cat:
+        bullets = [
+            f"- {val.title()} total por **{cat}**: {total} (sobre {rows} filas).",
+            "- Detalle por categoría:",
+            _fmt_list_top(facts.get("by_category", []), top=10)
+        ]
+    else:
+        bullets = [
+            f"- {val.title()} total: {total} (sobre {rows} filas)."
+        ]
+    return encabezado + "\n".join(bullets)
+
+def qualitative_sections(facts: dict, pregunta: str) -> str:
+    system = ("Eres un analista financiero. Redacta secciones claras SIN introducir cifras nuevas: "
+              "si necesitas referirte a montos, usa expresiones cualitativas (alto/bajo/estable).")
+    facts_min = {
+        "sheet": facts.get("sheet"),
+        "value_col": facts.get("value_col"),
+        "category_col": facts.get("category_col"),
+    }
+    prompt = f"""
+Contexto (no inventes números):
+{json.dumps(facts_min, ensure_ascii=False)}
+
+Pregunta del usuario:
+{pregunta}
+
+Escribe exactamente estas secciones, sin cifras:
+### Diagnóstico
+- …
+
+### Estimaciones y proyecciones
+- …
+
+### Recomendaciones de gestión
+- …
+
+### Riesgos y alertas
+- …
+
+### Próximos pasos
+- …
+"""
+    txt = ask_gpt([{"role":"system","content":system},{"role":"user","content":prompt}])
+    return txt or ""
+
+# =======================
+# PROMPTS IA (análisis general / legacy)
 # =======================
 def make_system_prompt():
     return ("Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
@@ -662,8 +865,11 @@ elif ss.menu_sel == "Consulta IA":
         c1b, c2b = st.columns(2)
         left, right = st.columns([0.58, 0.42])
 
-        def _render_text_and_viz(raw_text: str, fallback_question: str = ""):
-            texto, instr = split_text_and_viz(raw_text)
+        # ---- Botón: Análisis general (legacy con visual planner)
+        if c1b.button("📊 Análisis General Automático"):
+            analisis = analizar_datos_taller(data, "")
+            raw = ask_gpt(prompt_analisis_general(analisis))
+            texto, instr = split_text_and_viz(raw)
             with left:
                 render_ia_html_block(texto, height=620)
             with right:
@@ -672,24 +878,71 @@ elif ss.menu_sel == "Consulta IA":
                     ok = render_viz_instructions(instr, data)
                 except Exception as e:
                     st.error(f"Error en instrucción de visualización: {e}")
-                if not ok and fallback_question:
+                if not ok:
                     try:
                         schema = _build_schema(data)
-                        plan = plan_from_llm(fallback_question, schema)
+                        plan = plan_from_llm("Sugerir mejor visual", schema)
                         execute_plan(plan, data)
                     except Exception as e:
                         st.error(f"Error ejecutando plan: {e}")
-            ss.historial.append({"pregunta": fallback_question or "Análisis general", "respuesta": texto})
+            ss.historial.append({"pregunta":"Análisis general","respuesta":texto})
 
-        if c1b.button("📊 Análisis General Automático"):
-            analisis = analizar_datos_taller(data, "")
-            raw = ask_gpt(prompt_analisis_general(analisis))
-            _render_text_and_viz(raw, "Sugerir mejor visual")
-
+        # ---- Botón: Responder (MODO VERIFICADO)
         if c2b.button("Responder") and pregunta:
             schema = _build_schema(data)
-            raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
-            _render_text_and_viz(raw, pregunta)
+            # 1) Plan de cómputo (IA decide columnas/operación sin calcular)
+            plan_c = plan_compute_from_llm(pregunta, schema)
+            # 2) Cálculo con pandas (nuestros números)
+            facts = execute_compute(plan_c, data)
+
+            if not facts.get("ok"):
+                with left:
+                    st.error(f"No pude calcular con precisión: {facts.get('msg')}. Uso ruta clásica.")
+                # Fallback clásico (evitar quedarse sin respuesta)
+                raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
+                texto, instr = split_text_and_viz(raw)
+                with left:
+                    render_ia_html_block(texto, height=620)
+                with right:
+                    ok = False
+                    try:
+                        ok = render_viz_instructions(instr, data)
+                    except Exception as e:
+                        st.error(f"Error en instrucción de visualización: {e}")
+                    if not ok:
+                        try:
+                            plan = plan_from_llm(pregunta, schema)
+                            execute_plan(plan, data)
+                        except Exception as e:
+                            st.error(f"Error ejecutando plan: {e}")
+                ss.historial.append({"pregunta":pregunta,"respuesta":texto})
+            else:
+                # 3) Texto verificado: resumen con cifras + cualitativo sin cifras
+                texto = build_verified_summary(facts) + "\n\n" + qualitative_sections(facts, pregunta)
+                with left:
+                    render_ia_html_block(texto, height=620)
+
+                # 4) Visualización basada en nuestro DataFrame (coherente con texto)
+                with right:
+                    df_res = facts["df_result"]
+                    if facts.get("category_col"):
+                        try:
+                            mostrar_grafico_barras_v3(
+                                df_res.rename(columns={facts["category_col"]: "CATEGORIA",
+                                                       facts["value_col"]: "VALOR"}),
+                                "CATEGORIA", "VALOR",
+                                f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
+                            )
+                        except Exception as e:
+                            st.error(f"Error graficando: {e}")
+                            st.dataframe(df_res, use_container_width=True)
+                    else:
+                        st.metric(f"{facts['op'].upper()} de {facts['value_col']}", _fmt_pesos(facts["total"]))
+                        st.dataframe(df_res, use_container_width=True)
+
+                    st.caption(f"Hoja: {facts['sheet']} • Filas consideradas: {facts['rows']} • TOTAL: {_fmt_pesos(facts['total'])}")
+
+                ss.historial.append({"pregunta":pregunta,"respuesta":texto})
 
 # ---- Historial
 elif ss.menu_sel == "Historial":
