@@ -15,7 +15,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-roles-v1"
+APP_BUILD = "build-2025-08-26-roles-v2-tablefix"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -144,19 +144,26 @@ CURRENCY_COMMA_RE = re.compile(r'(?<![\w$])(\d{1,3}(?:,\d{3})+)(?![\w%])')
 CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
-
-# --- Sanitizador $ ---
 ARTIFACT_DOLLAR_BETWEEN_GROUPS = re.compile(r'(?<=[\.,])\$(?=\d{3}\b)')
+
+def _to_clp(i: int) -> str:
+    return f"${i:,}".replace(",", ".")
+
 def fix_peso_artifacts(t: str) -> str:
     if not t: return t
     t = ARTIFACT_DOLLAR_BETWEEN_GROUPS.sub('', t)
     t = re.sub(r'\$\s*\$+', '$', t)
     t = re.sub(r'\$\s+(?=\d)', '$', t)
+    # elimina decimales en CLP si los hay
     t = re.sub(r'\$(\d{1,3}(?:[.,]\d{3})+)[.,]\d{1,2}\b', r'$\1', t)
     return t
 
-def _to_clp(i: int) -> str:
-    return f"${i:,}".replace(",", ".")
+def _space_punct_outside_numbers(s: str) -> str:
+    # Espacio tras coma solo si NO viene un dígito (evita $687,590 → $687, 590)
+    s = re.sub(r',(?=[^\d\s])', ', ', s)
+    # Dos puntos normal
+    s = re.sub(r':(?=[^\s])', ': ', s)
+    return s
 
 def prettify_answer(text: str) -> str:
     if not text: return text
@@ -166,26 +173,34 @@ def prettify_answer(text: str) -> str:
     t = INVISIBLES_RE.sub('', t)
     t = ALL_SPACES_RE.sub(' ', t)
     t = t.replace("•", "\n- ").replace("“","\"").replace("”","\"").replace("’","'")
+    # limpia itálicas/inline code
     t = re.sub(r'([*_`~]{1,3})(?=\S)(.+?)(?<=\S)\1', r'\2', t)
     t = TITLE_LINE_RE.sub(r'\1\n', t)
     t = re.sub(r'^[\s]*[-•]\s*', '- ', t, flags=re.M)
-    t = re.sub(r'[ \t]+', ' ', t); t = re.sub(r'\n\s+', '\n', t)
+    t = re.sub(r'[ \t]+', ' ', t)
+    t = re.sub(r'\n\s+', '\n', t)
+
+    # ajustes léxicos menores
     t = re.sub(r'(?i)\bmargende\b', 'margen de', t)
     t = re.sub(r'(?i)\bmientrasque\b', 'mientras que', t)
     t = re.sub(r'(?i)(?:US|CLP|COP|S)\s*\$', '$', t)
-    def _mill(m): 
+
+    # normalización numérica ANTES de espaciar comas
+    def _mill(m):
         try: return _to_clp(int(round(float(m.group(1).replace(",","."))*1_000_000)))
         except: return m.group(0)
     def _mil(m):
         try: return _to_clp(int(round(float(m.group(1).replace(",","."))*1_000)))
         except: return m.group(0)
+
     t = MILLONES_RE.sub(_mill, t)
     t = MILES_RE.sub(_mil, t)
     t = CURRENCY_COMMA_RE.sub(lambda m: _to_clp(int(m.group(1).replace(',',''))), t)
     t = CURRENCY_DOT_RE.sub(  lambda m: _to_clp(int(m.group(1).replace('.',''))), t)
     t = fix_peso_artifacts(t)
-    t = re.sub(r':(?=\S)', ': ', t)
-    t = re.sub(r',(?=\S)', ', ', t)
+
+    # AHORA sí, espacio tras signos fuera de números
+    t = _space_punct_outside_numbers(t)
     return t.strip()
 
 def sanitize_text_for_html(s: str) -> str:
@@ -199,7 +214,9 @@ def sanitize_text_for_html(s: str) -> str:
     t = re.sub(r'\$\$(.*?)\$\$', r'\1', t, flags=re.S)
     t = fix_peso_artifacts(t)
     t = t.replace("•", "\n- ")
-    t = re.sub(r'[ \t]+', ' ', t); t = re.sub(r'\n\s+','\n', t)
+    t = re.sub(r'[ \t]+', ' ', t)
+    t = re.sub(r'\n\s+','\n', t)
+    t = _space_punct_outside_numbers(t)
     return t.strip()
 
 def md_to_safe_html(markdown_text: str) -> str:
@@ -279,7 +296,7 @@ ID_PAT   = re.compile(r'(?i)\b(id|folio|factura|boleta|ot|orden|nro|n°|correlat
 MONEY_PAT= re.compile(r'(?i)(monto|valor|ingreso|ingresos|costo|costos|neto|bruto|precio|tarifa|pago|total|subtotal|margen|venta|ventas|compras)')
 PCT_PAT  = re.compile(r'(?i)(%|porcentaje|tasa|margen %|margen_pct|conversion)')
 DATE_PAT = re.compile(r'(?i)(fecha|emision|f_emision|periodo|mes|año|anio|fecha_factura)')
-QTY_PAT  = re.compile(r'(?i)(cantidad|unidades|servicios|items|piesas|piezas|qty|cant)')
+QTY_PAT  = re.compile(r'(?i)(cantidad|unidades|servicios|items|piezas|qty|cant)')
 CAT_HINT = re.compile(r'(?i)(tipo|clase|categoria|estado|proceso|servicio|cliente|patente|sucursal)')
 
 def _ratio_unique(s: pd.Series) -> float:
@@ -298,35 +315,26 @@ def _guess_role_for_column(df: pd.DataFrame, col: str) -> str:
     name = str(col)
     nname = _norm(name)
 
-    # si hay rol forzado por diccionario:
     forced = ss.roles_forced.get((ss.current_sheet_for_roles or "", _norm(name)))
     if forced: return forced
 
     if DATE_PAT.search(nname):
         return "date"
 
-    # tipo de datos
     s = df[col]
     dtype = str(s.dtype)
 
-    # porcentaje si el nombre indica
     if PCT_PAT.search(nname):
         return "percent"
-
-    # dinero si el nombre lo indica
     if MONEY_PAT.search(nname):
         return "money"
-
-    # id por nombre
     if ID_PAT.search(nname):
         return "id"
 
-    # heurísticas por datos
     if "datetime" in dtype or "date" in dtype:
         return "date"
 
     if pd.api.types.is_numeric_dtype(s):
-        # valores grandes y únicos -> id
         uniq = _ratio_unique(s)
         try:
             mx = float(pd.to_numeric(s, errors="coerce").max())
@@ -336,22 +344,14 @@ def _guess_role_for_column(df: pd.DataFrame, col: str) -> str:
 
         if _is_int_like(s) and uniq > 0.80 and (mx > 10000 or (mx-mn) > 10000):
             return "id"
-
-        # money si rango y valores altos
         if mx and mx >= 1000:
             return "money"
-
-        # quantities pequeñas
         if QTY_PAT.search(nname):
             return "quantity"
-
-        # si baja cardinalidad -> category
         if uniq < 0.20:
             return "category"
-
         return "quantity"
     else:
-        # strings: si baja cardinalidad -> category
         if _ratio_unique(s) < 0.20 or CAT_HINT.search(nname):
             return "category"
         return "text"
@@ -516,7 +516,7 @@ def _safe_plot(plot_fn, hoja, df, cat_raw, val_raw, titulo):
     except Exception as e:
         st.error(f"Error generando visualización en '{hoja}': {e}")
 
-def render_viz_instructions(instr_list, data_dict):
+def render_viz_instructions(instr_list, data_dict, prefer_table: bool=False):
     if not instr_list: return False
     for item in instr_list:
         _tipo, parts = item
@@ -526,10 +526,15 @@ def render_viz_instructions(instr_list, data_dict):
         for hoja, df in data_dict.items():
             if find_col(df, cat_raw) and find_col(df, val_raw):
                 try:
+                    if prefer_table or tipo == "tabla":
+                        mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw),
+                                      titulo or f"Tabla ({hoja})")
+                        return True
                     if tipo == "barras":
                         _safe_plot(mostrar_grafico_barras_v3, hoja, df, cat_raw, val_raw, titulo); return True
                     if tipo == "torta":
                         _safe_plot(mostrar_grafico_torta, hoja, df, cat_raw, val_raw, titulo); return True
+                    # fallback tabla
                     mostrar_tabla(df, find_col(df, cat_raw), find_col(df, val_raw), titulo or f"Tabla ({hoja})"); return True
                 except Exception as e:
                     st.error(f"Error generando visualización en '{hoja}': {e}")
@@ -695,11 +700,11 @@ def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any
         val_col = find_col(df, val_raw)
         if not val_col: continue
 
-        val_role = roles.get(val_col, "unknown")
+        value_role = roles.get(val_col, "unknown")
         # autocorrecciones
-        if val_role == "id" and op in {"sum","avg","max","min"}:
+        if value_role == "id" and op in {"sum","avg","max","min"}:
             op = "count"
-        if val_role == "percent" and op in {"sum","max","min"}:
+        if value_role == "percent" and op in {"sum","max","min"}:
             op = "avg"
 
         dff = _apply_filters(df, filters)
@@ -726,7 +731,8 @@ def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any
             df_res.columns = [str(cat_col), str(val_col)]
             return {
                 "ok": True, "msg": "", "sheet": h,
-                "value_col": val_col, "category_col": cat_col, "op": op,
+                "value_col": val_col, "value_role": value_role,
+                "category_col": cat_col, "op": op,
                 "rows": int(len(dff)), "total": total,
                 "by_category": [{"categoria": str(k), "valor": float(v) if pd.notna(v) else 0.0}
                                 for k, v in s.items()],
@@ -746,7 +752,8 @@ def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any
             df_res = pd.DataFrame({str(val_col): [total], "TOTAL": ["TOTAL"]})[[ "TOTAL", str(val_col)]]
             return {
                 "ok": True, "msg":"", "sheet": h,
-                "value_col": val_col, "category_col": "", "op": op,
+                "value_col": val_col, "value_role": value_role,
+                "category_col": "", "op": op,
                 "rows": int(len(dff)), "total": total,
                 "by_category": [],
                 "df_result": df_res
@@ -755,7 +762,7 @@ def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any
     return {"ok": False, "msg": "No se encontraron columnas compatibles en las hojas."}
 
 # =======================
-# INSIGHTS (igual que versión previa)
+# INSIGHTS
 # =======================
 def _fmt_pct(p):
     try: return f"{float(p)*100:.1f}%"
@@ -763,12 +770,10 @@ def _fmt_pct(p):
 
 def _guess_value_col(df: pd.DataFrame):
     roles = detect_roles_for_sheet(df, "tmp")
-    # prioriza money
     money_cols = [c for c,r in roles.items() if r=="money"]
     if money_cols: return money_cols[0]
     qty_cols = [c for c,r in roles.items() if r=="quantity"]
     if qty_cols: return qty_cols[0]
-    # fallback: primera numérica
     num = df.select_dtypes(include=[np.number]).columns
     return num[0] if len(num) else None
 
@@ -776,7 +781,6 @@ def _guess_process_col(df: pd.DataFrame):
     for name in ["proceso","tipo de proceso","tipo","servicio","servicios"]:
         c = find_col(df, name)
         if c: return c
-    # si roles tienen category preferimos esa
     roles = detect_roles_for_sheet(df, "tmp")
     for c,r in roles.items():
         if r=="category": return c
@@ -866,10 +870,30 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
         "sheet_for_process": hoja_proc
     }
 
-def _fmt_list_top(by_category, top=10):
+def _fmt_number_general(x):
+    try:
+        return f"{int(round(float(x))):,}".replace(",", ".")
+    except:
+        return str(x)
+
+def _fmt_list_top(by_category, top=10, role="unknown", op="sum"):
+    def _fmt(v):
+        if role == "money":
+            return _fmt_pesos(v)
+        if role == "percent":
+            try:
+                fv = float(v)
+                if 0 <= fv <= 1: fv *= 100
+                return f"{fv:.1f}%"
+            except:
+                return str(v)
+        if op == "count" or role in ("id","quantity"):
+            return _fmt_number_general(v)
+        return _fmt_number_general(v)
+
     out = []
     for i, item in enumerate(by_category[:top], 1):
-        cat = str(item["categoria"]); val = _fmt_pesos(item["valor"])
+        cat = str(item["categoria"]); val = _fmt(item["valor"])
         out.append(f"- {cat}: {val}")
     if len(by_category) > top:
         out.append(f"- (… {len(by_category)-top} más)")
@@ -878,18 +902,36 @@ def _fmt_list_top(by_category, top=10):
 def build_verified_summary(facts: dict) -> str:
     val = facts.get("value_col","valor")
     cat = facts.get("category_col","")
-    total = _fmt_pesos(facts.get("total",0))
+    role = facts.get("value_role","unknown")
+    op   = facts.get("op","sum")
+
+    def _fmt(v):
+        if role == "money":
+            return _fmt_pesos(v)
+        if role == "percent":
+            try:
+                fv = float(v)
+                if 0 <= fv <= 1: fv *= 100
+                return f"{fv:.1f}%"
+            except:
+                return str(v)
+        if op == "count" or role in ("id","quantity"):
+            return _fmt_number_general(v)
+        return _fmt_number_general(v)
+
+    total = _fmt(facts.get("total",0))
     rows = facts.get("rows",0)
+
     encabezado = "### Resumen ejecutivo\n"
-    if cat:
-        bullets = [
-            f"- {val.title()} total por **{cat}**: {total} (sobre {rows} filas).",
+    if cat and facts.get("by_category"):
+        lines = [
+            f"- {val.title()} ({op.upper()}) por **{cat}**: total {total} (sobre {rows} filas).",
             "- Detalle por categoría:",
-            _fmt_list_top(facts.get("by_category", []), top=10)
+            _fmt_list_top(facts.get("by_category", []), top=10, role=role, op=op)
         ]
     else:
-        bullets = [f"- {val.title()} total: {total} (sobre {rows} filas)."]
-    return encabezado + "\n".join(bullets)
+        lines = [f"- {val.title()} ({op.upper()}): {total} (sobre {rows} filas)."]
+    return encabezado + "\n".join(lines)
 
 def compose_actionable_text(ins: Dict[str,Any]) -> str:
     k = ins.get("kpis", {})
@@ -957,7 +999,7 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     return "\n\n".join(secciones)
 
 # =======================
-# PROMPTS (legacy)
+# PROMPTS
 # =======================
 def make_system_prompt():
     return ("Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
@@ -1137,14 +1179,23 @@ elif ss.menu_sel == "Consulta IA":
             with right:
                 ok = False
                 try:
-                    ok = render_viz_instructions(instr, data)
+                    ok = render_viz_instructions(instr, data, prefer_table=True)  # fuerza TABLA
                 except Exception as e:
                     st.error(f"Error en instrucción de visualización: {e}")
                 if not ok:
                     try:
                         schema = _build_schema(data)
                         plan = plan_from_llm("Sugerir mejor visual", schema)
-                        execute_plan(plan, data)
+                        # Fallback: forzar tabla también aquí
+                        if plan.get("action") in ("table","chart"):
+                            execute_plan({"action":"table",
+                                          "sheet": plan.get("sheet",""),
+                                          "category_col": plan.get("category_col",""),
+                                          "value_col": plan.get("value_col",""),
+                                          "chart":"tabla",
+                                          "title": plan.get("title","")}, data)
+                        else:
+                            st.info("No se sugirió visualización válida.")
                     except Exception as e:
                         st.error(f"Error ejecutando plan: {e}")
             ss.historial.append({"pregunta":"Análisis general","respuesta":texto})
@@ -1194,9 +1245,14 @@ elif ss.menu_sel == "Consulta IA":
                             st.error(f"Error graficando: {e}")
                             st.dataframe(df_res, use_container_width=True)
                     else:
-                        st.metric(f"{facts['op'].upper()} de {facts['value_col']}", _fmt_pesos(facts['total']))
+                        # métrica simple
+                        role = facts.get("value_role","unknown")
+                        valtxt = (_fmt_pesos(facts['total']) if role=="money"
+                                  else (_fmt_number_general(facts['total']) if facts['op']=="count" or role in ("id","quantity")
+                                        else _fmt_number_general(facts['total'])))
+                        st.metric(f"{facts['op'].upper()} de {facts['value_col']}", valtxt)
                         st.dataframe(df_res, use_container_width=True)
-                    st.caption(f"Hoja: {facts['sheet']} • Filas consideradas: {facts['rows']} • TOTAL: {_fmt_pesos(facts['total'])}")
+                    st.caption(f"Hoja: {facts['sheet']} • Filas consideradas: {facts['rows']}")
                 ss.historial.append({"pregunta":pregunta,"respuesta":texto})
 
 # ---- Historial
@@ -1234,3 +1290,4 @@ elif ss.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
+
