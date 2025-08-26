@@ -360,9 +360,8 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
         resumen = resumen.head(top_n)
         recorte = True
 
-    # >>> FIX: no usar .str sobre Index
-    labels = [str(x) for x in resumen.index.tolist()]
-    avg_len = float(np.mean([len(s) for s in labels])) if labels else 0.0
+    # ✅ FIX: calcular longitud media SIN .str sobre Index
+    avg_len = float(np.mean([len(str(x)) for x in resumen.index])) if len(resumen) else 0.0
 
     if avg_len > 10:
         _barras_horizontal(resumen, col_categoria, col_valor, titulo)
@@ -667,7 +666,6 @@ elif ss.menu_sel == "Consulta IA":
                 except Exception as e:
                     st.error(f"Error en instrucción de visualización: {e}")
                 if not ok:
-                    # Fallback: pedir plan y ejecutarlo
                     try:
                         schema = _build_schema(data)
                         plan = plan_from_llm("Sugerir mejor visual", schema)
