@@ -1,5 +1,5 @@
 # app.py
-# Controller Financiero IA — build: 2025-08-26-focus-v3
+# Controller Financiero IA — build: 2025-08-26-focus-v4
 
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-focus-v3"
+APP_BUILD = "build-2025-08-26-focus-v4"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -49,6 +49,7 @@ ss.setdefault("top_n_grafico", 12)
 ss.setdefault("aliases", {})
 ss.setdefault("menu_sel", "KPIs")
 ss.setdefault("roles_forced", {})   # {(hoja, col_normalizada): rol}
+ss.setdefault("_wkey", 0)           # contador para keys únicas
 
 
 # =======================
@@ -166,7 +167,7 @@ def fix_peso_artifacts(t: str) -> str:
     return t
 
 def _space_punct_outside_numbers(s: str) -> str:
-    s = re.sub(r',(?=[^\d\s])', ', ', s)  # coma seguida de no dígito → agrega espacio
+    s = re.sub(r',(?=[^\d\s])', ', ', s)
     s = re.sub(r':(?=[^\s])', ': ', s)
     return s
 
@@ -259,6 +260,10 @@ def render_ia_html_block(text: str, height: int = 560):
 # =======================
 # VIZ – UTILIDADES
 # =======================
+def _unique_key(prefix: str) -> str:
+    ss._wkey += 1
+    return f"{prefix}_{ss._wkey}"
+
 def _fmt_pesos(x, pos=None):
     try:
         if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -344,7 +349,6 @@ def detect_roles_for_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str,str]:
                 roles[name] = "quantity"
         else:
             roles[name] = "category" if (_ratio_unique(s) < 0.20 or CAT_HINT.search(nname)) else "text"
-    # forzados por hoja DICCIONARIO
     for (hoja, colnorm), rol in ss.roles_forced.items():
         if _norm(hoja) == _norm(sheet_name):
             for c in list(roles.keys()):
@@ -387,8 +391,10 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     resumen.loc[len(resumen)] = ["TOTAL", _fmt_pesos(total_val)]
     st.markdown(f"### 📊 {titulo if titulo else f'{col_val} por {col_categoria}'}")
     st.dataframe(resumen, use_container_width=True)
-    st.download_button("⬇️ Descargar tabla (CSV)", resumen.to_csv(index=False).encode("utf-8"),
-                       "tabla.csv", "text/csv")
+    st.download_button("⬇️ Descargar tabla (CSV)",
+                       resumen.to_csv(index=False).encode("utf-8"),
+                       "tabla.csv", "text/csv",
+                       key=_unique_key("csv"))
 
 def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
@@ -405,7 +411,11 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    try:
+        st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png",
+                           key=_unique_key("png"))
+    except Exception as e:
+        st.caption(f"Descarga no disponible: {e}")
 
 def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     fig, ax = plt.subplots()
@@ -420,7 +430,11 @@ def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
                         xytext=(5,0), ha='left', va='center', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    try:
+        st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png",
+                           key=_unique_key("png"))
+    except Exception as e:
+        st.caption(f"Descarga no disponible: {e}")
 
 def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None, top_n=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -451,8 +465,7 @@ def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None, top_n=N
         else:
             _barras_vertical(resumen, col_categoria, col_valor, titulo)
     except Exception as e:
-        st.error(f"No pude generar el gráfico: {e}. Muestro tabla como respaldo.")
-        mostrar_tabla(df, col_categoria, col_valor, titulo)
+        st.error(f"No pude generar el gráfico: {e}.")
         return
     if recorte:
         st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
@@ -465,7 +478,11 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
     ax.axis('equal'); ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     st.pyplot(fig)
-    st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png")
+    try:
+        st.download_button("⬇️ PNG", _export_fig(fig), "grafico.png", "image/png",
+                           key=_unique_key("png"))
+    except Exception as e:
+        st.caption(f"Descarga no disponible: {e}")
 
 
 # =======================
@@ -659,7 +676,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
 
 
 # =======================
-# COMPUTE (verificado) para respuestas numéricas
+# COMPUTE (verificado)
 # =======================
 def _guess_value_col(df: pd.DataFrame):
     roles = detect_roles_for_sheet(df, "tmp")
@@ -693,7 +710,6 @@ def _guess_process_col(df: pd.DataFrame):
     return None
 
 def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-    """Calcula totales/agrupaciones verificadas según plan."""
     if not plan_c:
         return {"ok": False, "msg": "No hubo plan de cómputo."}
     sheet = plan_c.get("sheet") or ""
@@ -705,7 +721,7 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
         roles = detect_roles_for_sheet(df, h)
 
         vraw = plan_c.get("value_col") or _guess_value_col(df)
-        if not vraw: 
+        if not vraw:
             last_err = "No se encontró columna de valor adecuada."
             continue
         vcol = find_col(df, vraw) or vraw
@@ -718,17 +734,14 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
         filters = plan_c.get("filters") or []
         op = (plan_c.get("op") or "sum").lower()
 
-        # Normalizar rol/op si value es ID
         vrole = roles.get(vcol, "unknown")
         if vrole == "id" and op != "count":
             op = "count"
 
-        # Aplicar filtros
         dff = _apply_filters(df, filters) if filters else df
 
-        # Operación
         try:
-            if ccol:  # por categoría
+            if ccol:
                 if op == "count":
                     srs = dff.groupby(ccol, dropna=False)[vcol].count()
                 elif op == "avg" or vrole == "percent":
@@ -740,7 +753,7 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
                 elif op == "min":
                     srs = pd.to_numeric(dff[vcol], errors="coerce")
                     srs = dff.assign(__v=srs).groupby(ccol, dropna=False)["__v"].min()
-                else:  # sum
+                else:
                     srs = pd.to_numeric(dff[vcol], errors="coerce")
                     srs = dff.assign(__v=srs).groupby(ccol, dropna=False)["__v"].sum()
                 srs = srs.sort_values(ascending=False)
@@ -753,7 +766,7 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
                     "rows": int(len(dff)), "total": total, "by_category": by_cat,
                     "value_role": vrole_out, "df_result": df_res
                 }
-            else:  # total
+            else:
                 if op == "count":
                     total = int(dff[vcol].count())
                 elif op == "avg" or vrole == "percent":
@@ -816,7 +829,6 @@ def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
             cat, val = best
             mostrar_tabla(df, cat, val, "Ingresos y Egresos (FINANZAS)")
             return
-    # Fallback KPIs
     try:
         k = analizar_datos_taller(data, "") or {}
     except Exception:
@@ -854,6 +866,46 @@ def find_best_pair_money(
         h, df, cat, val, _ = best
         return h, df, cat, val
     return None, None, None, None
+
+def find_best_pair_generic(
+    data: Dict[str, pd.DataFrame],
+    category_match: callable
+) -> Tuple[str, pd.DataFrame, str, str, str]:
+    """Devuelve (hoja, df, categoria, valor, modo) donde modo es 'sum' o 'count'."""
+    # 1) Preferir money
+    h, df, cat, val = find_best_pair_money(data, category_match)
+    if h: return h, df, cat, val, "sum"
+    # 2) Si no hay money, intentar quantity/num → sum
+    best = None
+    for hh, ddf in data.items():
+        if ddf is None or ddf.empty: continue
+        roles = detect_roles_for_sheet(ddf, hh)
+        cat_cols = [c for c,r in roles.items() if r=="category"]
+        matches = [c for c in cat_cols if category_match(_norm(c))]
+        if not matches: continue
+        num_cols = [c for c in ddf.select_dtypes(include=[np.number]).columns
+                    if roles.get(c) not in ("percent","id")]
+        for catc in matches:
+            pick = None; pick_sum = -1
+            for mcol in num_cols:
+                s = pd.to_numeric(ddf[mcol], errors="coerce").sum()
+                if s > pick_sum:
+                    pick_sum = s; pick = mcol
+            if pick is None: continue
+            if best is None or pick_sum > best[-1]:
+                best = (hh, ddf, catc, pick, pick_sum)
+    if best:
+        hh, ddf, catc, pick, _ = best
+        return hh, ddf, catc, pick, "sum"
+    # 3) Fallback: conteo por categoría
+    for hh, ddf in data.items():
+        if ddf is None or ddf.empty: continue
+        roles = detect_roles_for_sheet(ddf, hh)
+        cat_cols = [c for c,r in roles.items() if r=="category"]
+        matches = [c for c in cat_cols if category_match(_norm(c))]
+        if matches:
+            return hh, ddf, matches[0], "__count__", "count"
+    return None, None, None, None, None
 
 def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
     def is_tipo_cliente(colname_norm: str) -> bool:
@@ -1064,7 +1116,7 @@ def compose_focus_text(facts: Dict[str, Any], pregunta: str) -> str:
     out = []
     out.append("### Resumen ejecutivo (complementario)")
     if cat:
-        out.append(f"- Universo analizado: **{rows}** filas; métrica **{op.upper()} de {facts.get('value_col','valor')}** por **{cat}**.")
+        out.append(f"- Universo analizado: **{rows}** filas; métrica **{op.UPPER()} de {facts.get('value_col','valor')}** por **{cat}**.")
     else:
         out.append(f"- Universo analizado: **{rows}** filas; métrica **{op.upper()}** total.")
     if share_top1 is not None:
@@ -1273,11 +1325,11 @@ elif ss.menu_sel == "Consulta IA":
     else:
         st.markdown("### 🤖 Consulta")
         pregunta = st.text_area("Pregunta")
-        c1b, c2b = st.columns(2)
+        cBtns = st.columns(4)
         left, right = st.columns([0.58, 0.42])
 
-        # Análisis General Automático
-        if c1b.button("📊 Análisis General Automático"):
+        # --- Botones de análisis por tipo
+        if cBtns[0].button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
             ins = derive_global_insights(data)
             texto_extra = compose_actionable_text(ins)
@@ -1287,14 +1339,60 @@ elif ss.menu_sel == "Consulta IA":
             with left:
                 render_ia_html_block(texto, height=520)
             with right:
-                # Panel derecho EXACTO: (a) FINANZAS (tabla), (b) torta cliente, (c) barras proceso
                 render_finance_table(data)
                 st.markdown("### Distribución por cliente y procesos")
                 render_cliente_y_proceso(data)
             ss.historial.append({"pregunta":"Análisis general","respuesta":texto})
 
-        # Responder (verificado + roles + insights)
-        if c2b.button("Responder") and pregunta:
+        if cBtns[1].button("💵 Análisis Financiero"):
+            ins = derive_global_insights(data)
+            texto = "### Análisis financiero (foco)\n" + compose_actionable_text(ins)
+            with left:
+                render_ia_html_block(texto, height=520)
+            with right:
+                render_finance_table(data)
+
+        if cBtns[2].button("⚙️ Análisis Operacional"):
+            ins = derive_global_insights(data)
+            texto = "### Análisis operacional (foco en procesos)\n" + compose_actionable_text(ins)
+            with left:
+                render_ia_html_block(texto, height=520)
+            with right:
+                def is_proceso(n): return ("proceso" in n) or ("servicio" in n)
+                h, df, cat, val = find_best_pair_money(data, is_proceso)
+                if h:
+                    mostrar_grafico_barras_v3(df, cat, val, "Monto por Proceso")
+                else:
+                    st.info("No encontré un par (proceso, monto) para graficar.")
+
+        if cBtns[3].button("🔍 Insights de mercado"):
+            with left:
+                render_ia_html_block("### Insights de mercado\n- Mix por cliente y vehículos (marcas/modelos).\n- Detecta concentración y oportunidades de segmentación.", height=280)
+            with right:
+                def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
+                def is_vehiculo(n): return ("vehiculo" in n) or ("marca" in n) or ("modelo" in n)
+                c1, c2 = st.columns(2)
+                # Cliente
+                h, df, cat, val, modo = find_best_pair_generic(data, is_cliente)
+                with c1:
+                    if h and modo == "sum":
+                        mostrar_grafico_torta(df, cat, val, "Tipo de Cliente")
+                    elif h and modo == "count":
+                        mostrar_grafico_barras_v3(df.assign(__count__=1), cat, "__count__", "Clientes (conteo)")
+                    else:
+                        st.info("Sin columnas de cliente detectadas.")
+                # Vehículo / Marca / Modelo
+                h, df, cat, val, modo = find_best_pair_generic(data, is_vehiculo)
+                with c2:
+                    if h and modo == "sum":
+                        mostrar_grafico_barras_v3(df, cat, val, "Vehículo / Marca / Modelo")
+                    elif h and modo == "count":
+                        mostrar_grafico_barras_v3(df.assign(__count__=1), cat, "__count__", "Vehículo / Marca / Modelo (conteo)")
+                    else:
+                        st.info("Sin columnas de vehículo/marca/modelo detectadas.")
+
+        # --- Respuesta puntual (verificada)
+        if st.button("Responder") and pregunta:
             schema = _build_schema(data)
             plan_c = plan_compute_from_llm(pregunta, schema)
             facts = execute_compute(plan_c, data)
@@ -1320,11 +1418,9 @@ elif ss.menu_sel == "Consulta IA":
                             st.error(f"Error ejecutando plan: {e}")
                 ss.historial.append({"pregunta":pregunta,"respuesta":texto})
             else:
-                # Izquierda: texto complementario ENFOCADO al tema de la pregunta
                 texto_left = compose_focus_text(facts, pregunta)
                 with left:
                     render_ia_html_block(texto_left, height=520)
-                # Derecha: SOLO tablas/gráficos
                 with right:
                     df_res = facts["df_result"]
                     if facts.get("category_col"):
@@ -1383,4 +1479,3 @@ elif ss.menu_sel == "Diagnóstico IA":
             st.caption(f"Tokens usados en la prueba: {diag['usage_tokens']}")
         if diag["error"]:
             st.warning(f"Detalle: {diag['error']}")
-
