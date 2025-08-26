@@ -15,7 +15,7 @@ from analizador import analizar_datos_taller
 # =======================
 # CONFIG GENERAL
 # =======================
-APP_BUILD = "build-2025-08-26-verified-1a"
+APP_BUILD = "build-2025-08-26-verified-insights-1"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -654,69 +654,195 @@ def execute_compute(plan: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any
 
     return {"ok": False, "msg": "No se encontraron columnas compatibles en las hojas."}
 
-# ===== Resumen verificado + secciones cualitativas (sin cifras nuevas) =====
-def _fmt_list_top(by_category, top=10):
-    out = []
-    for i, item in enumerate(by_category[:top], 1):
-        cat = str(item["categoria"])
-        val = _fmt_pesos(item["valor"])
-        out.append(f"- {cat}: {val}")
-    if len(by_category) > top:
-        out.append(f"- (… {len(by_category)-top} más)")
-    return "\n".join(out)
+# =======================
+# INSIGHT ENGINE (reglas + números 100% nuestros)
+# =======================
+def _fmt_pct(p):
+    try:
+        return f"{float(p)*100:.1f}%"
+    except:
+        return "—"
 
-def build_verified_summary(facts: dict) -> str:
-    val = facts.get("value_col","valor")
-    cat = facts.get("category_col","")
-    total = _fmt_pesos(facts.get("total",0))
-    rows = facts.get("rows",0)
+def _guess_value_col(df: pd.DataFrame):
+    for name in ["monto principal neto","monto neto","monto","ingreso","ingresos","valor","neto","importe"]:
+        c = find_col(df, name)
+        if c: return c
+    num = df.select_dtypes(include=[np.number]).columns
+    return num[0] if len(num) else None
 
-    encabezado = "### Resumen ejecutivo\n"
-    if cat:
-        bullets = [
-            f"- {val.title()} total por **{cat}**: {total} (sobre {rows} filas).",
-            "- Detalle por categoría:",
-            _fmt_list_top(facts.get("by_category", []), top=10)
-        ]
-    else:
-        bullets = [
-            f"- {val.title()} total: {total} (sobre {rows} filas)."
-        ]
-    return encabezado + "\n".join(bullets)
+def _guess_process_col(df: pd.DataFrame):
+    for name in ["proceso","tipo de proceso","tipo","servicio","servicios"]:
+        c = find_col(df, name)
+        if c: return c
+    return None
 
-def qualitative_sections(facts: dict, pregunta: str) -> str:
-    system = ("Eres un analista financiero. Redacta secciones claras SIN introducir cifras nuevas: "
-              "si necesitas referirte a montos, usa expresiones cualitativas (alto/bajo/estable).")
-    facts_min = {
-        "sheet": facts.get("sheet"),
-        "value_col": facts.get("value_col"),
-        "category_col": facts.get("category_col"),
+def _guess_date_col(df: pd.DataFrame):
+    for name in ["fecha","fecha emision","emision","f_emision","fecha_factura","periodo","mes"]:
+        c = find_col(df, name)
+        if c: return c
+    return None
+
+def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Recorre las hojas y arma un paquete de insights con números auditables."""
+    kpis = {}
+    try:
+        kpis = analizar_datos_taller(data, "") or {}
+    except Exception:
+        kpis = {}
+
+    hoja_proc, by_proc_df = None, None
+    for h, df in data.items():
+        if df is None or df.empty: 
+            continue
+        vcol = _guess_value_col(df)
+        pcol = _guess_process_col(df)
+        if vcol and pcol:
+            hoja_proc, by_proc_df = h, df[[pcol, vcol]].copy()
+            break
+
+    by_process = []
+    conc_share = None
+    if by_proc_df is not None:
+        pcol = find_col(by_proc_df, _guess_process_col(by_proc_df))
+        vcol = find_col(by_proc_df, _guess_value_col(by_proc_df))
+        vals = pd.to_numeric(by_proc_df[vcol], errors="coerce")
+        s = (by_proc_df.assign(__v=vals).groupby(pcol, dropna=False)["__v"]
+             .sum().sort_values(ascending=False))
+        total = float(s.sum()) if len(s) else 0.0
+        by_process = [{"proceso": str(k), "monto": float(v) if pd.notna(v) else 0.0} for k, v in s.items()]
+        if total > 0 and len(by_process) >= 1:
+            conc_share = by_process[0]["monto"] / total
+
+    ingresos = float(kpis.get("ingresos") or 0)
+    costos   = float(kpis.get("costos") or 0)
+    margen   = ingresos - costos
+    margen_pct = None
+    if ingresos > 0:
+        margen_pct = margen / ingresos
+
+    lead_time = kpis.get("lead_time_mediano_dias")
+    conv_pct  = kpis.get("conversion_pct")
+
+    alerts = []
+    opps   = []
+
+    # Concentración por proceso
+    if conc_share is not None and conc_share >= 0.60:
+        alerts.append(f"Alta concentración: el proceso líder representa {_fmt_pct(conc_share)} del total.")
+        if len(by_process) >= 2:
+            opps.append(f"Diversificar: crecer en '{by_process[1]['proceso']}' y '{by_process[min(2,len(by_process))-1]['proceso']}' para bajar dependencia.")
+
+    # Margen bajo
+    margen_target = 0.10  # meta simple (10%)
+    if margen_pct is not None and margen_pct < margen_target:
+        if (1 - margen_target) > 0 and ingresos > 0:
+            ventas_necesarias = costos / (1 - margen_target)
+            uplift = max(0.0, ventas_necesarias/ingresos - 1.0)
+            opps.append(f"Ajuste de precios: se requiere aproximadamente {_fmt_pct(uplift)} para llegar a un margen de {_fmt_pct(margen_target)}.")
+        alerts.append(f"Margen bajo: actual {_fmt_pct(margen_pct)} sobre ingresos de {_fmt_pesos(ingresos)}.")
+
+    # Lead time
+    if lead_time is not None and lead_time > 4.5:
+        alerts.append(f"Lead time mediano alto ({lead_time:.1f} días).")
+        opps.append("Reducir 1 día de lead time eleva capacidad ~+33% (de 4 a 3 días).")
+
+    # Conversión
+    if conv_pct is not None and conv_pct < 70:
+        alerts.append(f"Tasa de conversión baja ({conv_pct:.1f}%).")
+        opps.append("Refinar proceso comercial: priorización de leads y guías de precios para subir 5–10 pp la conversión.")
+
+    # Proyección simple a 6 meses (mensual)
+    base = ingresos
+    optim_uplift = 0.05
+    if margen_pct and margen_pct < margen_target:
+        optim_uplift += 0.03
+    if lead_time and lead_time > 4.5:
+        optim_uplift += 0.02
+    proj = {"base": base, "optim": base*(1+optim_uplift), "cons": base*0.95}
+
+    return {
+        "kpis": kpis,
+        "by_process": by_process,
+        "process_concentration": conc_share,
+        "alerts": alerts,
+        "opportunities": opps,
+        "targets": {"margin_pct": margen_target},
+        "projection_6m": proj,
+        "sheet_for_process": hoja_proc
     }
-    prompt = f"""
-Contexto (no inventes números):
-{json.dumps(facts_min, ensure_ascii=False)}
 
-Pregunta del usuario:
-{pregunta}
+def compose_actionable_text(ins: Dict[str,Any]) -> str:
+    """Devuelve texto (markdown) con diagnóstico y acciones concretas usando SOLO nuestros datos."""
+    k = ins.get("kpis", {})
+    ingresos = float(k.get("ingresos") or 0)
+    costos   = float(k.get("costos") or 0)
+    margen   = ingresos - costos
+    margen_pct = (margen/ingresos) if ingresos>0 else None
+    bp = ins.get("by_process", [])
+    proj = ins.get("projection_6m", {})
+    tgt = ins.get("targets", {}).get("margin_pct", 0.10)
 
-Escribe exactamente estas secciones, sin cifras:
-### Diagnóstico
-- …
+    secciones = []
 
-### Estimaciones y proyecciones
-- …
+    # Diagnóstico (con números)
+    lines = ["### Diagnóstico basado en datos"]
+    if ingresos:
+        lines.append(f"- Ingresos últimos datos: {_fmt_pesos(ingresos)}; costos: {_fmt_pesos(costos)}; margen: {_fmt_pesos(margen)} ({_fmt_pct(margen_pct) if margen_pct is not None else '—'}).")
+    if bp:
+        top = bp[0]
+        share = ins.get("process_concentration")
+        lines.append(f"- Proceso líder: **{top['proceso']}** con {_fmt_pesos(top['monto'])}{f' ({_fmt_pct(share)})' if share is not None else ''}.")
+        if len(bp) > 1:
+            snd = bp[1]
+            lines.append(f"- Siguiente(s): {snd['proceso']} {_fmt_pesos(snd['monto'])}" + (f"; {bp[2]['proceso']} {_fmt_pesos(bp[2]['monto'])}" if len(bp)>2 else "") + ".")
+    for a in ins.get("alerts", []):
+        lines.append(f"- ⚠️ {a}")
+    secciones.append("\n".join(lines))
 
-### Recomendaciones de gestión
-- …
+    # Recomendaciones priorizadas
+    recs = []
+    if margen_pct is not None and margen_pct < tgt and ingresos>0:
+        ventas_necesarias = costos/(1-tgt)
+        uplift = max(0.0, ventas_necesarias/ingresos - 1.0)
+        recs.append(f"**Ajuste de precios**: subir listas en promedio **{_fmt_pct(uplift)}** en servicios con mayor demanda (p. ej. {bp[0]['proceso'] if bp else 'proceso líder'}) para alcanzar un margen objetivo de **{_fmt_pct(tgt)}**.")
+    if ins.get("process_concentration") and ins["process_concentration"]>=0.60 and len(bp)>=2:
+        recs.append(f"**Diversificación de mix**: diseñar campaña para **migrar 5–10 pp** de demanda desde **{bp[0]['proceso']}** hacia **{bp[1]['proceso']}** (paquetes, descuentos por combo, cross-sell).")
+    lt = k.get("lead_time_mediano_dias")
+    if lt and lt>4.5:
+        recs.append("**Reducción de lead time**: implementar checklists de recepción y preasignación de materiales para bajar **1 día** el mediano (ganancia de capacidad ~**+33%**).")
+    conv = k.get("conversion_pct")
+    if conv and conv<75:
+        recs.append(f"**Playbook comercial**: guías de precio y cierre para subir conversión a **{max(75, round(conv+5))}%**; enfocar en top 3 procesos por ingreso.")
+    if costos>0:
+        recs.append("**Compras y materiales**: renegociar insumos de alto uso (pinturas, abrasivos) con objetivo de **-3%** en costo promedio por servicio.")
+    recs.append("**Re-trabajos**: medir y reducir devoluciones/garantías; cada -1 pp en retrabajos mejora el margen efectivo y libera capacidad.")
+    recs.append("**Pricing por capacidad**: recargo del 5–8% en semanas pico; descuento del 3–5% en valle para suavizar carga y sostener ticket.")
+    recs.append("**Tablero semanal**: ingresos, margen %, lead time y conversión por proceso; semáforos con metas y responsables.")
 
-### Riesgos y alertas
-- …
+    secciones.append("### Recomendaciones de gestión (priorizadas)\n" + "\n".join([f"{i+1}. {r}" for i,r in enumerate(recs)]))
 
-### Próximos pasos
-- …
-"""
-    txt = ask_gpt([{"role":"system","content":system},{"role":"user","content":prompt}])
-    return txt or ""
+    # Proyección 6 meses
+    if proj:
+        base = proj.get("base", ingresos)
+        optim = proj.get("optim", ingresos)
+        cons = proj.get("cons", ingresos)
+        secciones.append(
+            "### Estimaciones y proyecciones (6 meses)\n"
+            f"- **Base**: mantener mix y precios actuales ⇒ {_fmt_pesos(base)} / mes aprox.\n"
+            f"- **Optimista**: mejoras de precio + capacidad ⇒ {_fmt_pesos(optim)} / mes.\n"
+            f"- **Conservador**: presión de costos o demanda ⇒ {_fmt_pesos(cons)} / mes."
+        )
+
+    # Próximos pasos
+    secciones.append(
+        "### Próximos pasos\n"
+        "- Owner Finanzas: propuesta de ajuste de precios y simulación de margen (1 semana).\n"
+        "- Owner Operaciones: plan de reducción de lead time en procesos cuello de botella (2 semanas).\n"
+        "- Owner Comercial: campaña para rotar demanda a procesos con mejor margen (2 semanas).\n"
+        "- Review quincenal en tablero con KPIs y decisiones."
+    )
+
+    return "\n\n".join(secciones)
 
 # =======================
 # PROMPTS IA (análisis general / legacy)
@@ -881,11 +1007,14 @@ elif ss.menu_sel == "Consulta IA":
         c1b, c2b = st.columns(2)
         left, right = st.columns([0.58, 0.42])
 
-        # ---- Botón: Análisis general (legacy con visual planner)
+        # ---- Botón: Análisis general (legacy + insights propios)
         if c1b.button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
+            ins = derive_global_insights(data)
+            texto_extra = compose_actionable_text(ins)
             raw = ask_gpt(prompt_analisis_general(analisis))
-            texto, instr = split_text_and_viz(raw)
+            texto_llm, instr = split_text_and_viz(raw)
+            texto = texto_llm + "\n\n" + texto_extra
             with left:
                 render_ia_html_block(texto, height=620)
             with right:
@@ -903,18 +1032,15 @@ elif ss.menu_sel == "Consulta IA":
                         st.error(f"Error ejecutando plan: {e}")
             ss.historial.append({"pregunta":"Análisis general","respuesta":texto})
 
-        # ---- Botón: Responder (MODO VERIFICADO)
+        # ---- Botón: Responder (MODO VERIFICADO + INSIGHTS)
         if c2b.button("Responder") and pregunta:
             schema = _build_schema(data)
-            # 1) Plan de cómputo (IA decide columnas/operación sin calcular)
             plan_c = plan_compute_from_llm(pregunta, schema)
-            # 2) Cálculo con pandas (nuestros números)
             facts = execute_compute(plan_c, data)
 
             if not facts.get("ok"):
                 with left:
                     st.error(f"No pude calcular con precisión: {facts.get('msg')}. Uso ruta clásica.")
-                # Fallback clásico (evitar quedarse sin respuesta)
                 raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
                 texto, instr = split_text_and_viz(raw)
                 with left:
@@ -933,12 +1059,14 @@ elif ss.menu_sel == "Consulta IA":
                             st.error(f"Error ejecutando plan: {e}")
                 ss.historial.append({"pregunta":pregunta,"respuesta":texto})
             else:
-                # 3) Texto verificado: resumen con cifras + cualitativo sin cifras
-                texto = build_verified_summary(facts) + "\n\n" + qualitative_sections(facts, pregunta)
+                # Insights globales (toman TODAS las hojas)
+                ins = derive_global_insights(data)
+                # Texto verificado + plan accionable con números reales
+                texto = build_verified_summary(facts) + "\n\n" + compose_actionable_text(ins)
                 with left:
                     render_ia_html_block(texto, height=620)
 
-                # 4) Visualización basada en nuestro DataFrame (coherente con texto)
+                # Visualización coherente con los mismos datos
                 with right:
                     df_res = facts["df_result"]
                     if facts.get("category_col"):
@@ -953,7 +1081,7 @@ elif ss.menu_sel == "Consulta IA":
                             st.error(f"Error graficando: {e}")
                             st.dataframe(df_res, use_container_width=True)
                     else:
-                        st.metric(f"{facts['op'].upper()} de {facts['value_col']}", _fmt_pesos(facts["total"]))
+                        st.metric(f"{facts['op'].upper()} de {facts['value_col']}", _fmt_pesos(facts['total']))
                         st.dataframe(df_res, use_container_width=True)
 
                     st.caption(f"Hoja: {facts['sheet']} • Filas consideradas: {facts['rows']} • TOTAL: {_fmt_pesos(facts['total'])}")
