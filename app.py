@@ -53,85 +53,29 @@ ss.setdefault("_wkey", 0)
 # -------------------------------------------------------------------
 # Helpers de LOGO (robustos, soportan URL y archivos locales PNG/JPG/SVG/GIF)
 # -------------------------------------------------------------------
-def _guess_mime(path_or_url: str) -> str:
-    p = path_or_url.lower()
-    if p.endswith(".png"):  return "image/png"
-    if p.endswith(".jpg") or p.endswith(".jpeg"): return "image/jpeg"
-    if p.endswith(".gif"):  return "image/gif"
-    if p.endswith(".svg"):  return "image/svg+xml"
-    # por defecto
-    return "image/png"
-
-def _abs_existing(path_like: str) -> Optional[Path]:
-    """Devuelve Path absoluto existente. Mira relativo al archivo actual también."""
-    p = Path(path_like)
-    if p.exists(): 
-        return p.resolve()
-    here = Path(__file__).parent.resolve()
-    p2 = (here / path_like)
-    if p2.exists():
-        return p2.resolve()
-    return None
-
-def _resolve_logo() -> dict:
+def show_corner_logo(size_px: int = 44, pos_top: int = 10, pos_right: int = 14):
     """
-    Devuelve un dict con:
-      {'ok':bool, 'src':<data-uri o url>, 'kind':'url'|'file', 'where':'origen'}
-    Busca en este orden:
-      - secrets: LOGO_URL / APP_LOGO_URL (URL)
-      - secrets: LOGO_PATH (ruta local)
-      - env:     LOGO_URL / APP_LOGO_URL / LOGO_PATH
-      - archivos comunes del repo
+    Dibuja el logo fijo arriba-derecha en cualquier pantalla (login o app).
+    Usa la misma fuente que ya resolviste con _logo_src().
     """
-    # 1) URLs por secrets/env
-    for key in ("LOGO_URL", "APP_LOGO_URL"):
-        url = st.secrets.get(key) or os.getenv(key)
-        if url and (str(url).startswith("http://") or str(url).startswith("https://")):
-            return {"ok": True, "src": str(url), "kind": "url", "where": f"secrets/env:{key}"}
-
-    # 2) Rutas locales por secrets/env (absolutas o relativas)
-    for key in ("LOGO_PATH",):
-        p = st.secrets.get(key) or os.getenv(key)
-        if p:
-            abs_p = _abs_existing(str(p))
-            if abs_p:
-                mime = _guess_mime(str(abs_p))
-                data = abs_p.read_bytes()
-                b64  = base64.b64encode(data).decode("utf-8")
-                return {"ok": True, "src": f"data:{mime};base64,{b64}", "kind":"file", "where": f"secrets/env:{key} -> {abs_p}"}
-
-    # 3) Archivos comunes en el repo
-    candidates = [
-        "logo.png", "logo.jpg", "logo.jpeg", "logo.svg", "logo.gif",
-        "assets/logo.png", "assets/logo.jpg", "assets/logo.svg",
-        "static/logo.png", "static/logo.jpg", "static/logo.svg",
-        "images/logo.png", "images/logo.jpg", "images/logo.svg",
-        "assets/img/logo.png", "assets/img/logo.jpg", "assets/img/logo.svg",
-    ]
-    for c in candidates:
-        abs_p = _abs_existing(c)
-        if abs_p:
-            mime = _guess_mime(str(abs_p))
-            data = abs_p.read_bytes()
-            b64  = base64.b64encode(data).decode("utf-8")
-            return {"ok": True, "src": f"data:{mime};base64,{b64}", "kind":"file", "where": f"repo:{abs_p}"}
-
-    return {"ok": False, "src": "", "kind": "none", "where": "no encontrado"}
-
-def _logo_src() -> Optional[str]:
-    """Devuelve un src listo para <img> o None si no hay logo."""
-    r = _resolve_logo()
-    return r["src"] if r["ok"] else None
-
-def show_top_right_logo(size_px: int = 48):
-    """Logo fijo arriba-derecha (vista principal)."""
     src = _logo_src()
-    if not src: 
+    if not src:
         return
     st.markdown(
         f"""
-        <style>.header-logo{{position:fixed;top:10px;right:14px;z-index:9999;}}</style>
-        <div class="header-logo"><img src="{src}" width="{size_px}"></div>
+        <style>
+        .corner-logo {{
+            position: fixed;
+            top: {pos_top}px;
+            right: {pos_right}px;
+            z-index: 10000;
+            pointer-events: none; /* no tapa botones */
+        }}
+        @media (max-width: 820px) {{
+            .corner-logo img {{ width: {int(size_px*0.75)}px; }}
+        }}
+        </style>
+        <div class="corner-logo"><img src="{src}" width="{size_px}"></div>
         """,
         unsafe_allow_html=True,
     )
@@ -139,42 +83,35 @@ def show_top_right_logo(size_px: int = 48):
 
 
 # ---------------------------
-# LOGIN (igual que el tuyo, solo cambiamos cómo se muestra el logo)
+# LOGIN
 # ---------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 def login():
+    # Logo fijo arriba-derecha también en el login (tamaño un poco mayor)
+    size_login = int(str(st.secrets.get("LOGO_SIZE_LOGIN", 56)))
+    show_corner_logo(size_px=size_login)
+
     st.markdown("## 🔐 Iniciar sesión")
-    col_form, col_logo = st.columns([0.62, 0.38])
-    with col_form:
-        username = st.text_input("Usuario")
-        password = st.text_input("Contraseña", type="password")
-        if st.button("Iniciar sesión"):
-            try_user = st.secrets.get("USER", None)
-            try_pass = st.secrets.get("PASSWORD", None)
-            if try_user is None or try_pass is None:
-                st.error("Secrets USER/PASSWORD no configurados. Agrega USER y PASSWORD en secrets.toml / Cloud.")
-                return
-            if username == try_user and password == try_pass:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Credenciales incorrectas")
-    with col_logo:
-        src = _logo_src()
-        if src:
-            st.markdown(f'<div style="padding-top:6px;text-align:center;"><img src="{src}" width="160"/></div>',
-                        unsafe_allow_html=True)
+    username = st.text_input("Usuario")
+    password = st.text_input("Contraseña", type="password")
+    if st.button("Iniciar sesión"):
+        try_user = st.secrets.get("USER", None)
+        try_pass = st.secrets.get("PASSWORD", None)
+        if try_user is None or try_pass is None:
+            st.error("Secrets USER/PASSWORD no configurados. Agrega USER y PASSWORD en secrets.toml / Cloud.")
+            return
+        if username == try_user and password == try_pass:
+            st.session_state.authenticated = True
+            st.rerun()
         else:
-            st.caption("Sin logo (configura LOGO_URL o LOGO_PATH)")
+            st.error("Credenciales incorrectas")
 
 if not st.session_state.authenticated:
     login()
     st.stop()
 
-# Ya autenticado: muestra el logo fijo arriba a la derecha
-show_top_right_logo(48)
 
 
 # ======== Carga de datos ========
@@ -1526,6 +1463,7 @@ elif ss.menu_sel == "Diagnóstico IA":
         else: st.info("No se pudo determinar la cuota.")
         if diag["usage_tokens"] is not None: st.caption(f"Tokens: {diag['usage_tokens']}")
         if diag["error"]: st.warning(f"Detalle: {diag['error']}")
+
 
 
 
