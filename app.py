@@ -19,6 +19,87 @@ from analizador import analizar_datos_taller
 APP_BUILD = "build-2025-08-27-focus-v7b"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
+
+# =========================
+# 🔐 Login + Logo (added)
+# =========================
+# Lee secretos (o usa defaults seguros)
+def _get_secret(name, default=None):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+# Credenciales de acceso (puedes setear en .streamlit/secrets.toml)
+_USER_DEFAULT = "admin"
+_PASS_DEFAULT = "1234"
+USER = _get_secret("USER", _USER_DEFAULT) or _USER_DEFAULT
+PASSWORD = _get_secret("PASSWORD", _PASS_DEFAULT) or _PASS_DEFAULT
+
+# Logo configurable
+LOGO_PATH = _get_secret("LOGO_PATH", "Fenix_isotipo.png") or "Fenix_isotipo.png"
+try:
+    LOGO_SIZE_LOGIN = int(_get_secret("LOGO_SIZE_LOGIN", 56) or 56)
+except Exception:
+    LOGO_SIZE_LOGIN = 56
+try:
+    LOGO_SIZE_APP = int(_get_secret("LOGO_SIZE_APP", 42) or 42)
+except Exception:
+    LOGO_SIZE_APP = 42
+
+# Estado de autenticación
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def render_logo_topright(size_px: int):
+    """Muestra el logo alineado arriba a la derecha con ancho fijo (px)."""
+    try:
+        spacer, col_logo = st.columns([1, 0.14], vertical_alignment="center")
+        with col_logo:
+            st.image(LOGO_PATH, width=int(size_px))
+    except Exception:
+        # Si falla la carga, no interrumpimos la app
+        pass
+
+def _logout():
+    st.session_state.authenticated = False
+    # Limpia cachés/datos si aplica
+    for k in ["data", "gsheet_url", "excel_file", "aliases", "roles_by_sheet"]:
+      if k in st.session_state:
+          st.session_state.pop(k, None)
+    st.rerun()
+
+def _login_view():
+    render_logo_topright(LOGO_SIZE_LOGIN)
+    st.markdown("## 🔐 Iniciar sesión")
+    with st.form("login_form"):
+        u = st.text_input("Usuario", value="")
+        p = st.text_input("Contraseña", type="password", value="")
+        ok = st.form_submit_button("Entrar")
+        if ok:
+            if (u or "") == str(USER) and (p or "") == str(PASSWORD):
+                st.session_state.authenticated = True
+                st.success("Acceso concedido. Cargando…")
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+
+# Botón de cerrar sesión solo si ya inició
+if st.session_state.authenticated:
+    st.sidebar.button("🚪 Cerrar sesión", on_click=_logout, use_container_width=True)
+
+# Gate de acceso: si no está autenticado, muestra login y detiene la renderización
+if not st.session_state.authenticated:
+    _login_view()
+    st.stop()
+
+# Logo en la vista principal (arriba a la derecha)
+render_logo_topright(LOGO_SIZE_APP)
+
+# =========================
+# 🔐 Fin Login + Logo
+# =========================
+
 # ======== Estilo ========
 st.markdown("""
 <style>
@@ -1394,3 +1475,4 @@ elif ss.menu_sel == "Diagnóstico IA":
         else: st.info("No se pudo determinar la cuota.")
         if diag["usage_tokens"] is not None: st.caption(f"Tokens: {diag['usage_tokens']}")
         if diag["error"]: st.warning(f"Detalle: {diag['error']}")
+
