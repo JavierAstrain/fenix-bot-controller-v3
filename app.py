@@ -1,5 +1,5 @@
 # app.py
-# Controller Financiero IA — build: 2025-08-27 focus-v6
+# Controller Financiero IA — build: 2025-08-27 focus-v7
 
 import streamlit as st
 import pandas as pd
@@ -16,7 +16,7 @@ from streamlit.components.v1 import html as st_html
 
 from analizador import analizar_datos_taller
 
-APP_BUILD = "build-2025-08-27-focus-v6"
+APP_BUILD = "build-2025-08-27-focus-v7"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 # -----------------------------  Estilo general  -----------------------------
@@ -147,6 +147,12 @@ def _space_punct_outside_numbers(s: str) -> str:
     s = re.sub(r':(?=[^\s])', ': ', s)
     return s
 
+def fmt_money(x):
+    try:
+        return f"${int(round(float(x))):,}".replace(",", ".")
+    except Exception:
+        return str(x)
+
 def prettify_answer(text: str) -> str:
     if not text: return text
     t = unicodedata.normalize("NFKC", text)
@@ -169,8 +175,7 @@ def prettify_answer(text: str) -> str:
     def _mil(m):
         try: return fmt_money(int(round(float(m.group(1).replace(",","."))*1_000)))
         except: return m.group(0)
-    t = MILLONES_RE.sub(_mill, t)
-    t = MILES_RE.sub(_mil, t)
+    t = MILLONES_RE.sub(_mill, t); t = MILES_RE.sub(_mil, t)
     t = CURRENCY_COMMA_RE.sub(lambda m: fmt_money(int(m.group(1).replace(',',''))), t)
     t = CURRENCY_DOT_RE.sub(  lambda m: fmt_money(int(m.group(1).replace('.',''))), t)
     t = fix_peso_artifacts(t)
@@ -229,18 +234,23 @@ def render_ia_html_block(text: str, height: int = 560):
     </style></head><body>{safe_html}</body></html>"""
     st_html(page, height=height, scrolling=True)
 
-# -----------------------------  Formato de moneda ---------------------------
-def fmt_money(x):
-    try:
-        return f"${int(round(float(x))):,}".replace(",", ".")
-    except Exception:
-        return str(x)
-
-def _fmt_pesos(x, pos=None):  # SOLO para ejes de Matplotlib
+# -----------------------------  Ejes y números ------------------------------
+def _fmt_pesos(x, pos=None):  # SOLO para ejes de moneda
     try:
         return f"${int(round(float(x))):,}".replace(",", ".")
     except Exception:
         return ""
+
+def _fmt_int_axis(x, pos=None):
+    try:
+        return f"{int(round(float(x))):,}".replace(",", ".")
+    except Exception:
+        return ""
+
+def _fmt_number_general(x):
+    try:
+        return f"{int(round(float(x))):,}".replace(",", ".")
+    except: return str(x)
 
 # -----------------------------  Helpers genéricos ---------------------------
 def _unique_key(prefix: str) -> str:
@@ -258,12 +268,12 @@ def _norm(s: str) -> str:
     s = re.sub(r'\s+',' ', s)
     return s.lower()
 
-ID_PAT   = re.compile(r'(?i)\b(id|folio|factura|boleta|ot|orden|nro|n°|correlativo|documento|doc|num|numero)\b')
+ID_PAT   = re.compile(r'(?i)\b(id|folio|factura|boleta|ot|orden|nro|n°|correlativo|documento|doc|num|numero|oc|os)\b')
 MONEY_PAT= re.compile(r'(?i)(monto|valor|ingreso|ingresos|costo|costos|neto|bruto|precio|tarifa|pago|total|subtotal|margen|venta|ventas|compras)')
 PCT_PAT  = re.compile(r'(?i)(%|porcentaje|tasa|margen %|margen_pct|conversion)')
-DATE_PAT = re.compile(r'(?i)(fecha|emision|f_emision|periodo|mes|año|anio|fecha_factura|fecha_ot)')
+DATE_PAT = re.compile(r'(?i)(fecha|emision|f_emision|periodo|mes|año|anio|fecha_factura|fecha_ot|fecha_ingreso|fecha_salida)')
 QTY_PAT  = re.compile(r'(?i)(cantidad|unidades|servicios|items|piezas|qty|cant)')
-CAT_HINT = re.compile(r'(?i)(tipo|clase|categoria|estado|proceso|servicio|cliente|patente|sucursal|marca|modelo|vehiculo)')
+CAT_HINT = re.compile(r'(?i)(tipo|clase|categoria|estado|proceso|servicio|cliente|patente|sucursal|marca|modelo|vehiculo|vehículo)')
 
 def _ratio_unique(s: pd.Series) -> float:
     n = len(s)
@@ -337,18 +347,19 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
                        "tabla.csv", "text/csv",
                        key=_unique_key("csv"))
 
-def _barras_vertical(resumen, col_categoria, col_valor, titulo):
+def _barras_vertical_generic(resumen, titulo, as_money=True):
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
-    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_ylabel(col_valor)
-    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_title(titulo)
+    ax.set_ylabel("Valor")
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos if as_money else _fmt_int_axis))
     ax.tick_params(axis='x', rotation=45)
     for lbl in ax.get_xticklabels(): lbl.set_ha('right')
     for b in bars:
         y = b.get_height()
         if np.isfinite(y):
-            ax.annotate(fmt_money(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
+            label = (fmt_money(y) if as_money else _fmt_number_general(y))
+            ax.annotate(label, (b.get_x()+b.get_width()/2, y), textcoords="offset points",
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
@@ -358,16 +369,17 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     except Exception as e:
         st.caption(f"Descarga no disponible: {e}")
 
-def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
+def _barras_horizontal_generic(resumen, titulo, as_money=True):
     fig, ax = plt.subplots()
     bars = ax.barh(resumen.index.astype(str), resumen.values)
-    ax.set_title(titulo or f"{col_valor} por {col_categoria}")
-    ax.set_xlabel(col_valor)
-    ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.set_title(titulo)
+    ax.set_xlabel("Valor")
+    ax.xaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos if as_money else _fmt_int_axis))
     for b in bars:
         x = b.get_width()
         if np.isfinite(x):
-            ax.annotate(fmt_money(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
+            label = (fmt_money(x) if as_money else _fmt_number_general(x))
+            ax.annotate(label, (x, b.get_y()+b.get_height()/2), textcoords="offset points",
                         xytext=(5,0), ha='left', va='center', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
@@ -377,7 +389,8 @@ def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     except Exception as e:
         st.caption(f"Descarga no disponible: {e}")
 
-def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None, top_n=None):
+def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None):
+    # MODO MONEDA (por compatibilidad hacia atrás)
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals)
                  .groupby(col_categoria, dropna=False)["__v"]
@@ -393,23 +406,26 @@ def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None, top_n=N
                 return
     except Exception:
         pass
-    if top_n is None:
-        top_n = ss.get("top_n_grafico", 12)
-    recorte = False
-    if len(resumen) > top_n:
-        resumen = resumen.head(top_n); recorte = True
     labels = [str(x) for x in resumen.index.tolist()]
     avg_len = float(np.mean([len(s) for s in labels])) if labels else 0.0
-    try:
-        if avg_len > 10:
-            _barras_horizontal(resumen, col_categoria, col_valor, titulo)
-        else:
-            _barras_vertical(resumen, col_categoria, col_valor, titulo)
-    except Exception as e:
-        st.error(f"No pude generar el gráfico: {e}.")
-        return
-    if recorte:
-        st.caption(f"Mostrando Top-{top_n}. Usa tabla para el detalle completo.")
+    if avg_len > 10:
+        _barras_horizontal_generic(resumen, titulo or f"{col_valor} por {col_categoria}", True)
+    else:
+        _barras_vertical_generic(resumen, titulo or f"{col_valor} por {col_categoria}", True)
+
+def mostrar_grafico_barras_count(df, col_categoria, col_valor, titulo=None):
+    # MODO CONTEO (sin $)
+    vals = pd.to_numeric(df[col_valor], errors="coerce")
+    resumen = (df.assign(__v=vals)
+                 .groupby(col_categoria, dropna=False)["__v"]
+                 .sum()
+                 .sort_values(ascending=False))
+    labels = [str(x) for x in resumen.index.tolist()]
+    avg_len = float(np.mean([len(s) for s in labels])) if labels else 0.0
+    if avg_len > 10:
+        _barras_horizontal_generic(resumen, titulo or f"Conteo por {col_categoria}", False)
+    else:
+        _barras_vertical_generic(resumen, titulo or f"Conteo por {col_categoria}", False)
 
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -491,7 +507,7 @@ def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
     df_tab["Monto"] = df_tab["Monto"].apply(fmt_money)
     st.dataframe(df_tab, use_container_width=True)
 
-# -----------------------------  Buscadores "mejor par" ----------------------
+# -----------------------------  Pairs y conteos -----------------------------
 def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable):
     best = None
     for h, df in data.items():
@@ -550,14 +566,41 @@ def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callab
             return hh, ddf, matches[0], "__count__", "count"
     return None, None, None, None, None
 
+def make_count_df_by_id(df: pd.DataFrame, cat_col: str, roles: Dict[str,str]) -> Optional[pd.DataFrame]:
+    id_cols = [c for c,r in roles.items() if r=="id"]
+    if not id_cols:  # sin id: cuenta filas
+        g = df.groupby(cat_col, dropna=False).size().reset_index(name="__count__")
+        return g
+    idc = id_cols[0]
+    d = df[[cat_col, idc]].dropna(subset=[idc])
+    d = d.drop_duplicates([cat_col, idc])
+    g = d.groupby(cat_col, dropna=False)[idc].nunique().reset_index(name="__count__")
+    return g
+
+def best_count_by_category(data: Dict[str,pd.DataFrame], category_match: callable):
+    best = None
+    for h, df in data.items():
+        if df is None or df.empty: continue
+        roles = detect_roles_for_sheet(df, h)
+        cats = [c for c,r in roles.items() if r in ("category","text")]
+        matches = [c for c in cats if category_match(_norm(c))]
+        if not matches: continue
+        cat = matches[0]
+        g = make_count_df_by_id(df, cat, roles)
+        if g is None or g.empty: continue
+        total = int(g["__count__"].sum())
+        if best is None or total > best[-1]:
+            best = (h, df, cat, g, total)
+    if best:
+        h, df, cat, g, _ = best
+        return h, df, cat, g
+    return None, None, None, None
+
 # -----------------------------  Bloques de la UI ----------------------------
 def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
-    def is_tipo_cliente(colname_norm: str) -> bool:
-        return (("cliente" in colname_norm) and (("tipo" in colname_norm) or ("segment" in colname_norm)))
+    def is_tipo_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
     h1, df1, cat1, val1 = find_best_pair_money(data, is_tipo_cliente)
-
-    def is_proceso(colname_norm: str) -> bool:
-        return (("proceso" in colname_norm) or ("servicio" in colname_norm))
+    def is_proceso(n): return (("proceso" in n) or ("servicio" in n))
     h2, df2, cat2, val2 = find_best_pair_money(data, is_proceso)
 
     c1, c2 = st.columns(2)
@@ -569,14 +612,6 @@ def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
         with c2: mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
     else:
         with c2: st.info("No encontré dinero + 'Proceso' para graficar.")
-
-def _fmt_pct(p):
-    try: return f"{float(p)*100:.1f}%"
-    except: return "—"
-
-def _fmt_number_general(x):
-    try: return f"{int(round(float(x))):,}".replace(",", ".")
-    except: return str(x)
 
 def detect_focus_from_question(q: str) -> dict:
     qn = _norm(q)
@@ -594,6 +629,7 @@ def detect_focus_from_question(q: str) -> dict:
         return {"focus": "finanzas", "cat_hints": ["categoria", "tipo", "glosa"]}
     return {"focus": "general", "cat_hints": []}
 
+# -----------------------------  Insights & textos ---------------------------
 def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         kpis = analizar_datos_taller(data, "") or {}
@@ -631,31 +667,19 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     lt = kpis.get("lead_time_mediano_dias"); conv = kpis.get("conversion_pct")
     alerts, opps = [], []
     if conc_share is not None and conc_share >= 0.60:
-        alerts.append(f"Alta concentración: el proceso líder representa {_fmt_pct(conc_share)} del total.")
+        alerts.append(f"Alta concentración: el proceso líder representa {conc_share*100:.1f}% del total.")
         if len(by_process) >= 2: opps.append(f"Diversificar hacia '{by_process[1]['proceso']}'.")
     margen_target = 0.10
     if margen_pct is not None and margen_pct < margen_target and ingresos>0:
         ventas_nec = costos/(1-margen_target); uplift = max(0.0, ventas_nec/ingresos-1.0)
-        opps.append(f"Ajustes de precios: subir {_fmt_pct(uplift)} para margen objetivo {_fmt_pct(margen_target)}.")
-        alerts.append(f"Margen bajo: actual {_fmt_pct(margen_pct)} sobre {fmt_money(ingresos)}.")
+        opps.append(f"Ajustes de precios: subir {uplift*100:.1f}% para margen objetivo {margen_target*100:.1f}%.")
+        alerts.append(f"Margen bajo: actual {margen_pct*100:.1f}% sobre {fmt_money(ingresos)}.")
     if lt and lt>4.5: opps.append("Reducir lead time 1 día eleva capacidad ~+33%.")
     if conv and conv<75: opps.append("Subir conversión 5–10 pp con playbook de cierre.")
     proj = {"base": ingresos, "optim": ingresos*(1+0.05), "cons": ingresos*0.95}
     return {"kpis":kpis,"by_process":by_process,"process_concentration":conc_share,
             "alerts":alerts,"opportunities":opps,"targets":{"margin_pct":margen_target},
             "projection_6m":proj,"sheet_for_process":sheet_for_process,"by_process_role":"money"}
-
-def build_verified_summary(facts: dict) -> str:
-    val = facts.get("value_col","valor")
-    cat = facts.get("category_col","")
-    op   = facts.get("op","sum")
-    total = facts.get("total",0); rows = facts.get("rows",0)
-    encabezado = "### Resumen ejecutivo\n"
-    if cat and facts.get("by_category"):
-        lines = [f"- {val.title()} ({op.upper()}): total {fmt_money(total)} por **{cat}** (sobre {rows} filas)."]
-    else:
-        lines = [f"- {val.title()} ({op.upper()}): {fmt_money(total)} (sobre {rows} filas)."]
-    return encabezado + "\n".join(lines)
 
 def compose_actionable_text(ins: Dict[str,Any]) -> str:
     k = ins.get("kpis", {})
@@ -666,22 +690,21 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     proj = ins.get("projection_6m", {})
     tgt = ins.get("targets", {}).get("margin_pct", 0.10)
 
-    def _fmt_byrole(v): return fmt_money(v)
-
-    secciones = []
     lines = ["### Diagnóstico basado en datos"]
     if ingresos:
-        lines.append(f"- Ingresos últimos datos: {fmt_money(ingresos)}; costos: {fmt_money(costos)}; margen: {fmt_money(margen)} ({_fmt_pct(margen_pct) if margen_pct is not None else '—'}).")
+        lines.append(f"- Ingresos: {fmt_money(ingresos)}; costos: {fmt_money(costos)}; margen: {fmt_money(margen)} ({margen_pct*100:.1f}%).")
     if bp:
         top = bp[0]; share = ins.get("process_concentration")
-        lines.append(f"- Proceso líder: **{top['proceso']}** con {_fmt_byrole(top['monto'])}{f' ({_fmt_pct(share)})' if share is not None else ''}.")
+        if share is not None:
+            lines.append(f"- Proceso líder: **{top['proceso']}** con {fmt_money(top['monto'])} ({share*100:.1f}%).")
+        else:
+            lines.append(f"- Proceso líder: **{top['proceso']}** con {fmt_money(top['monto'])}.")
     for a in ins.get("alerts", []): lines.append(f"- ⚠️ {a}")
-    secciones.append("\n".join(lines))
 
     recs = []
     if margen_pct is not None and margen_pct < tgt and ingresos>0:
         ventas_nec = costos/(1-tgt); uplift = max(0.0, ventas_nec/ingresos - 1.0)
-        recs.append(f"**Ajuste de precios**: subir **{_fmt_pct(uplift)}** para alcanzar margen de **{_fmt_pct(tgt)}**.")
+        recs.append(f"**Ajuste de precios**: subir **{uplift*100:.1f}%** para alcanzar margen de **{tgt*100:.1f}%**.")
     if ins.get("process_concentration") and ins["process_concentration"]>=0.60 and len(bp)>=2:
         recs.append(f"**Diversificar mix**: empujar desde **{bp[0]['proceso']}** a **{bp[1]['proceso']}**.")
     lt = k.get("lead_time_mediano_dias")
@@ -689,6 +712,9 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     conv = k.get("conversion_pct")
     if conv and conv<75: recs.append("**Comercial**: subir 5–10 pp la conversión (playbook de cierre).")
     if costos>0: recs.append("**Compras**: renegociar insumos clave (meta -3% costo promedio).")
+
+    secciones = []
+    secciones.append("\n".join(lines))
     secciones.append("### Recomendaciones de gestión (priorizadas)\n" + "\n".join([f"{i+1}. {r}" for i,r in enumerate(recs)]))
 
     if proj:
@@ -737,59 +763,53 @@ def compose_operational_text(data: Dict[str, Any]) -> str:
     return "\n".join(bloques)
 
 def compose_market_text(data: Dict[str, Any]) -> str:
-    # Detecta tipo cliente, marca, modelo y estacionalidad
-    def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
+    # Top marcas y modelos por RECURRENCIA DE OCs/OTs (conteo de IDs únicos)
     def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
     def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
 
-    # Helper to get top list
-    def top_from_pair(pair):
-        if not pair or not pair[0]: return []
-        h, df, cat, val, modo = pair
-        if modo == "sum":
-            s = (df.assign(__v=pd.to_numeric(df[val], errors="coerce"))
-                   .groupby(cat, dropna=False)["__v"].sum().sort_values(ascending=False).head(5))
-            return [(str(k), float(v), "monto") for k,v in s.items()]
-        else:
-            s = df[cat].astype(str).value_counts().head(5)
-            return [(str(k), int(v), "conteo") for k,v in s.items()]
+    def top_from_count(match_fn):
+        h, df, cat, g = best_count_by_category(data, match_fn)
+        if not h: return []
+        g = g.sort_values("__count__", ascending=False).head(5)
+        return [(str(r[cat]), int(r["__count__"])) for _, r in g.iterrows()]
 
-    pc = find_best_pair_generic(data, is_cliente)
-    pm = find_best_pair_generic(data, is_marca)
-    pmo= find_best_pair_generic(data, is_modelo)
+    top_marca  = top_from_count(is_marca)
+    top_modelo = top_from_count(is_modelo)
 
-    top_cliente = top_from_pair(pc)
-    top_marca   = top_from_pair(pm)
-    top_modelo  = top_from_pair(pmo)
-
-    # Estacionalidad (fecha + monto)
+    # Estacionalidad (fecha + monto si existe; si no, conteo de OTs)
     estac_txt = "—"
     for h, df in data.items():
         if df is None or df.empty: continue
         roles = detect_roles_for_sheet(df, h)
         date_cols = [c for c,r in roles.items() if r=="date"]
+        if not date_cols: continue
+        dt = pd.to_datetime(df[date_cols[0]], errors="coerce")
+        d2 = df.assign(__mm = dt.dt.to_period("M").dt.to_timestamp(),
+                       MES = lambda d: d["__mm"].dt.strftime("%Y-%m"))
         money_cols= [c for c,r in roles.items() if r=="money"]
-        if date_cols and money_cols:
-            dt = pd.to_datetime(df[date_cols[0]], errors="coerce")
-            d2 = (df.assign(__mm = dt.dt.to_period("M").dt.to_timestamp())
-                    .assign(MES=lambda d: d["__mm"].dt.strftime("%Y-%m")))
+        if money_cols:
             s = (d2.assign(__v=pd.to_numeric(d2[money_cols[0]], errors="coerce"))
                     .groupby("MES")["__v"].sum().sort_values(ascending=False))
             if len(s)>0:
                 estac_txt = f"mes pico: {s.index[0]} ({fmt_money(float(s.iloc[0]))})"
-            break
+                break
+        else:
+            s = d2.groupby("MES").size().sort_values(ascending=False)
+            if len(s)>0:
+                estac_txt = f"mes pico: {s.index[0]} ({_fmt_number_general(int(s.iloc[0]))} OCs)"
+                break
 
     lines = ["### Insights de mercado",
              "- Mix de clientes y productos, con focos comerciales accionables.",
-             "\n**Top marcas**:"]
+             "\n**Top marcas (por OCs/OTs)**:"]
     if top_marca:
-        lines += [f"- {i+1}. {n}: {fmt_money(v) if t=='monto' else _fmt_number_general(v)}" for i,(n,v,t) in enumerate(top_marca)]
+        lines += [f"- {i+1}. {n}: {_fmt_number_general(v)}" for i,(n,v) in enumerate(top_marca)]
     else:
         lines.append("- No se detectaron marcas.")
 
-    lines.append("\n**Top modelos**:")
+    lines.append("\n**Top modelos (por OCs/OTs)**:")
     if top_modelo:
-        lines += [f"- {i+1}. {n}: {fmt_money(v) if t=='monto' else _fmt_number_general(v)}" for i,(n,v,t) in enumerate(top_modelo)]
+        lines += [f"- {i+1}. {n}: {_fmt_number_general(v)}" for i,(n,v) in enumerate(top_modelo)]
     else:
         lines.append("- No se detectaron modelos.")
 
@@ -895,9 +915,9 @@ Devuelve SOLO un JSON para visualización:
 
 Reglas:
 - Usa nombres EXACTOS del esquema (insensible a mayúsculas).
-- Evita columnas rol 'id' como value_col.
+- Evita columnas rol 'id' como value_col (usa conteo si no hay otra).
 - Si value_col es 'percent', considera mostrar promedio.
-- Si no procede, "action":"text".
+- Si la pregunta pide meses/años, probablemente convenga usar un eje temporal.
 
 ESQUEMA:
 {json.dumps(schema, ensure_ascii=False, indent=2)}
@@ -976,7 +996,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
         if not (cat_real and val_real): continue
         if roles.get(val_real) == "id":
             st.info("La columna de valor es 'id'; muestro recuento por categoría.")
-            mostrar_tabla(df.assign(**{val_real:1}), cat_real, val_real, title or "Recuento")
+            mostrar_grafico_barras_count(df.assign(__count__=1), cat_real, "__count__", title or "Recuento")
             return True
         try:
             if action == "table":
@@ -1035,7 +1055,11 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
 
             if ccol:
                 if op == "count":
-                    srs = dff.groupby(ccol, dropna=False)[vcol].count()
+                    # si el valor es id → contar distintos
+                    if vrole == "id":
+                        srs = dff.groupby(ccol, dropna=False)[vcol].nunique()
+                    else:
+                        srs = dff.groupby(ccol, dropna=False)[vcol].count()
                 elif op == "avg" or vrole == "percent":
                     srs = pd.to_numeric(dff[vcol], errors="coerce")
                     srs = dff.assign(__v=srs).groupby(ccol, dropna=False)["__v"].mean()
@@ -1058,7 +1082,7 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
                         "value_role": vrole_out, "df_result": df_res}
             else:
                 if op == "count":
-                    total = int(dff[vcol].count())
+                    total = int(dff[vcol].nunique()) if vrole=="id" else int(dff[vcol].count())
                 elif op == "avg" or vrole == "percent":
                     total = float(pd.to_numeric(dff[vcol], errors="coerce").mean())
                 elif op == "max":
@@ -1076,6 +1100,62 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
             last_err = f"Cálculo falló en '{h}': {e}"
             continue
     return {"ok": False, "msg": last_err or "No se pudo calcular."}
+
+def build_verified_summary(facts: dict) -> str:
+    val = facts.get("value_col","valor")
+    cat = facts.get("category_col","")
+    op   = facts.get("op","sum")
+    total = facts.get("total",0); rows = facts.get("rows",0)
+    encabezado = "### Resumen ejecutivo\n"
+    def _fmt(v): 
+        if facts.get("value_role")=="money" and op!="count": return fmt_money(v)
+        return _fmt_number_general(v)
+    if cat and facts.get("by_category"):
+        lines = [f"- {val.title()} ({op.upper()}): total {_fmt(total)} por **{cat}** (sobre {rows} filas)."]
+    else:
+        lines = [f"- {val.title()} ({op.upper()}): {_fmt(total)} (sobre {rows} filas)."]
+    return encabezado + "\n".join(lines)
+
+def compose_focus_text(facts: dict, pregunta: str) -> str:
+    # Texto accionable y específico de la consulta ya calculada
+    op     = (facts.get("op") or "sum").upper()
+    vrole  = facts.get("value_role","unknown")
+    vcol   = facts.get("value_col","valor")
+    cat    = facts.get("category_col")
+    rows   = facts.get("rows",0)
+    total  = facts.get("total",0)
+    by_cat = facts.get("by_category", [])
+
+    def _fmt(v):
+        if vrole=="money" and op!="COUNT": return fmt_money(v)
+        return _fmt_number_general(v)
+
+    lines = [build_verified_summary(facts)]
+    lines.append("### Diagnóstico")
+    if cat and by_cat:
+        top3 = by_cat[:3]
+        det = "; ".join([f"{c['categoria']}: {_fmt(c['valor'])}" for c in top3])
+        lines.append(f"- Top 3 por **{cat}** → {det}.")
+        if len(by_cat) >= 5:
+            tail = by_cat[3:5]
+            det2 = "; ".join([f"{c['categoria']}: {_fmt(c['valor'])}" for c in tail])
+            lines.append(f"- Siguientes → {det2}.")
+    else:
+        lines.append(f"- Resultado global: {_fmt(total)}.")
+
+    # Recomendaciones simples basadas en rol:
+    recs = []
+    if vrole=="money" and op in ("SUM","MAX"):
+        recs.append("Ajustar mix hacia categorías con mejor margen.")
+        recs.append("Revisar pricing en categorías con menor aporte.")
+    elif op=="COUNT":
+        recs.append("Diseñar campañas sobre las 3 categorías más frecuentes.")
+        recs.append("Apalancar referidos en categorías con mayor recurrencia.")
+    else:
+        recs.append("Monitorizar tendencia en el tiempo para validar estabilidad.")
+    lines.append("### Recomendaciones\n" + "\n".join([f"- {r}" for r in recs]))
+
+    return "\n\n".join(lines)
 
 # -----------------------------  Interfaz ------------------------------------
 st.title("🤖 Controller Financiero IA")
@@ -1198,36 +1278,25 @@ elif ss.menu_sel == "Consulta IA":
             with left:
                 render_ia_html_block(compose_market_text(data), height=520)
             with right:
-                def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
+                # Graficos por CONTEO de OCs/OTs
                 def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
                 def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
 
                 c_top = st.columns(2)
 
-                # Tipo cliente
-                hC, dfC, catC, valC = find_best_pair_money(data, is_cliente)
-                if hC:
-                    mostrar_grafico_torta(dfC, catC, valC, "Tipo de Cliente")
-
                 # Marcas
-                hM, dfM, catM, valM, modoM = find_best_pair_generic(data, is_marca)
+                hM, dfM, catM, gM = best_count_by_category(data, is_marca)
                 with c_top[0]:
                     if hM:
-                        if modoM == "sum":
-                            mostrar_grafico_barras_v3(dfM, catM, valM, "Top Marcas (monto)")
-                        else:
-                            mostrar_grafico_barras_v3(dfM.assign(__count__=1), catM, "__count__", "Top Marcas (conteo)")
+                        mostrar_grafico_barras_count(gM, catM, "__count__", "Top Marcas (por OCs/OTs)")
                     else:
                         st.info("Sin columna de **marca**.")
 
                 # Modelos
-                hMo, dfMo, catMo, valMo, modoMo = find_best_pair_generic(data, is_modelo)
+                hMo, dfMo, catMo, gMo = best_count_by_category(data, is_modelo)
                 with c_top[1]:
                     if hMo:
-                        if modoMo == "sum":
-                            mostrar_grafico_barras_v3(dfMo, catMo, valMo, "Top Modelos (monto)")
-                        else:
-                            mostrar_grafico_barras_v3(dfMo.assign(__count__=1), catMo, "__count__", "Top Modelos (conteo)")
+                        mostrar_grafico_barras_count(gMo, catMo, "__count__", "Top Modelos (por OCs/OTs)")
                     else:
                         st.info("Sin columna de **modelo**.")
 
@@ -1248,7 +1317,7 @@ elif ss.menu_sel == "Consulta IA":
                 if not found:
                     st.info("No encontré (fecha + monto) para estacionalidad.")
 
-        # Botón Responder (ahora arriba, 5to botón)
+        # Botón Responder (arriba, 5to botón)
         if cBtns[4].button("Responder") and pregunta:
             schema = _build_schema(data)
             plan_c = plan_compute_from_llm(pregunta, schema)
@@ -1256,7 +1325,7 @@ elif ss.menu_sel == "Consulta IA":
 
             if not facts.get("ok"):
                 with left:
-                    st.error(f"No pude calcular con precisión: {facts.get('msg')}. Uso la ruta de análisis clásico.")
+                    st.error(f"No pude calcular con precisión: {facts.get('msg') or 'plan vacío'}. Uso la ruta de análisis clásico.")
                 raw = ask_gpt(prompt_consulta_libre(pregunta, schema))
                 with left:  render_ia_html_block(raw, height=620)
                 with right:
@@ -1276,20 +1345,27 @@ elif ss.menu_sel == "Consulta IA":
                     df_res = facts["df_result"]
                     if facts.get("category_col"):
                         try:
-                            mostrar_grafico_barras_v3(
-                                df_res.rename(columns={facts["category_col"]: "CATEGORIA",
-                                                       "VALOR": "VALOR"}),
-                                "CATEGORIA", "VALOR",
-                                f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
-                            )
+                            if facts.get("value_role")=="money" and facts.get("op","sum")!="count":
+                                mostrar_grafico_barras_v3(
+                                    df_res.rename(columns={facts["category_col"]: "CATEGORIA",
+                                                           "VALOR": "VALOR"}),
+                                    "CATEGORIA", "VALOR",
+                                    f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
+                                )
+                            else:
+                                mostrar_grafico_barras_count(
+                                    df_res.rename(columns={facts["category_col"]: "CATEGORIA",
+                                                           "VALOR": "VALOR"}),
+                                    "CATEGORIA", "VALOR",
+                                    f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
+                                )
                         except Exception as e:
                             st.error(f"Error graficando: {e}")
                             st.dataframe(df_res, use_container_width=True)
                     else:
                         role = facts.get("value_role","unknown")
-                        valtxt = (fmt_money(facts['total']) if role=="money"
-                                  else (_fmt_number_general(facts['total']) if facts['op']=="count" or role in ("id","quantity")
-                                        else _fmt_number_general(facts['total'])))
+                        valtxt = (fmt_money(facts['total']) if role=="money" and facts.get("op","sum")!="count"
+                                  else _fmt_number_general(facts['total']))
                         st.metric(f"{facts['op'].upper()} de {facts['value_col']}", valtxt)
                         st.dataframe(df_res, use_container_width=True)
                     st.caption(f"Hoja: {facts['sheet']} • Filas: {facts['rows']}")
