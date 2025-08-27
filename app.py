@@ -130,8 +130,7 @@ def _register_default_font():
 def _mk_paragraph(text: str, style_name: str, styles, font_name: str):
     # Sanitiza y reemplaza saltos de línea por <br/>
     safe = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    safe = safe.replace("
-", "<br/>")
+    safe = safe.replace("\n", "<br/>")
     style = ParagraphStyle(name=style_name, parent=styles["Normal"], fontName=font_name, fontSize=10, leading=14)
     return Paragraph(safe, style)
 
