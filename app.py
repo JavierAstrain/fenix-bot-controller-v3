@@ -96,6 +96,134 @@ if not st.session_state.authenticated:
 # Logo en la vista principal (arriba a la derecha)
 render_logo_topright(LOGO_SIZE_APP)
 
+
+# =========================
+# 📄 Exportar Historial a PDF
+# =========================
+from io import BytesIO
+from datetime import datetime
+
+# Importa reportlab si está disponible
+try:
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    HAVE_REPORTLAB = True
+except Exception:
+    HAVE_REPORTLAB = False
+
+def _register_default_font():
+    """Intenta registrar una fuente con soporte amplio (DejaVuSans.ttf). Si no está, usa la por defecto."""
+    try:
+        # Si el archivo está en el repo, registrarlo
+        if Path("DejaVuSans.ttf").exists():
+            pdfmetrics.registerFont(TTFont("DejaVuSans", "DejaVuSans.ttf"))
+            return "DejaVuSans"
+    except Exception:
+        pass
+    # Fallback: Helvetica (puede limitar acentos Unicode)
+    return "Helvetica"
+
+def _mk_paragraph(text: str, style_name: str, styles, font_name: str):
+    # Sanitiza y reemplaza saltos de línea por <br/>
+    safe = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe = safe.replace("
+", "<br/>")
+    style = ParagraphStyle(name=style_name, parent=styles["Normal"], fontName=font_name, fontSize=10, leading=14)
+    return Paragraph(safe, style)
+
+def build_historial_pdf_bytes(historial, titulo="Historial de Sesión — Fénix Controller", autor="Fénix Automotriz", logo_path=LOGO_PATH):
+    """
+    Genera un PDF (bytes) a partir de la lista de dicts en st.session_state.historial
+    Formato de cada item esperado: {"pregunta": str, "respuesta": str, "ts": optional datetime/str}
+    """
+    buffer = BytesIO()
+    # Documento base
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
+    styles = getSampleStyleSheet()
+    font_name = _register_default_font()
+    story = []
+
+    # Encabezado
+    # Logo si existe
+    try:
+        if Path(logo_path).exists():
+            story.append(RLImage(logo_path, width=2.0*cm, height=2.0*cm))
+            story.append(Spacer(1, 0.2*cm))
+    except Exception:
+        pass
+
+    title_style = ParagraphStyle(name="Title", parent=styles["Title"], fontName=font_name, fontSize=16, leading=20)
+    subtitle_style = ParagraphStyle(name="Sub", parent=styles["Normal"], fontName=font_name, fontSize=10, textColor="#555555")
+    story.append(Paragraph(titulo, title_style))
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+    story.append(Paragraph(f"Generado: {fecha}", subtitle_style))
+    story.append(Spacer(1, 0.5*cm))
+
+    # Cuerpo: iterar Q/A
+    if not historial:
+        story.append(_mk_paragraph("No hay entradas en el historial.", "Empty", styles, font_name))
+    else:
+        for i, item in enumerate(historial, start=1):
+            q = str(item.get("pregunta", ""))
+            a = str(item.get("respuesta", ""))
+            ts = item.get("ts")
+            if ts:
+                try:
+                    ts = str(ts)
+                except Exception:
+                    ts = None
+
+            story.append(_mk_paragraph(f"<b>#{i} — Pregunta</b>", f"QH{i}", styles, font_name))
+            story.append(_mk_paragraph(q, f"Q{i}", styles, font_name))
+            story.append(Spacer(1, 0.15*cm))
+
+            story.append(_mk_paragraph(f"<b>Respuesta</b>", f"AH{i}", styles, font_name))
+            story.append(_mk_paragraph(a, f"A{i}", styles, font_name))
+            story.append(Spacer(1, 0.35*cm))
+
+            # Salto de página suave cada ~6 bloques (opcional)
+            if i % 6 == 0:
+                story.append(PageBreak())
+
+    try:
+        doc.build(story)
+        pdf_bytes = buffer.getvalue()
+    finally:
+        buffer.close()
+    return pdf_bytes
+
+# Asegura que exista el historial en session_state
+if "historial" not in st.session_state:
+    st.session_state.historial = []
+
+# UI en el sidebar para descarga del PDF
+with st.sidebar:
+    st.markdown("### 📄 Exportar")
+    if HAVE_REPORTLAB:
+        if st.session_state.historial:
+            try:
+                _pdf_data = build_historial_pdf_bytes(st.session_state.historial)
+                st.download_button(
+                    "Descargar historial (PDF)",
+                    data=_pdf_data,
+                    file_name=f"historial_fenix_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.warning(f"No se pudo generar el PDF: {e}")
+        else:
+            st.caption("Aún no hay historial para exportar.")
+    else:
+        st.info("Para exportar a PDF, agrega `reportlab` a tu requirements.txt y vuelve a desplegar.")
+# =========================
+# 📄 Fin Exportar Historial
+# =========================
+
 # =========================
 # 🔐 Fin Login + Logo
 # =========================
