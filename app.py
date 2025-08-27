@@ -1,6 +1,8 @@
 # app.py
 # Controller Financiero IA — build: 2025-08-27 focus-v7b
-
+from pathlib import Path
+import base64
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -46,6 +48,68 @@ ss.setdefault("roles_forced", {})
 ss.setdefault("_wkey", 0)
 
 # ---------------------------
+
+# -------------------------------------------------
+# Logo helpers (login y top-right)
+# -------------------------------------------------
+def _resolve_logo_src():
+    """
+    Devuelve ('file'|'url', ruta_o_url) si encuentra el logo, o (None, None) si no hay.
+    Orden de búsqueda:
+      - st.secrets.LOGO_URL / APP_LOGO_URL (URL)
+      - st.secrets.LOGO_PATH (ruta local)
+      - variables de entorno LOGO_URL / APP_LOGO_URL
+      - archivos comunes del repo: 'logo.png', 'assets/logo.png', 'static/logo.png'
+    """
+    candidates = [
+        st.secrets.get("LOGO_URL"),
+        st.secrets.get("APP_LOGO_URL"),
+        st.secrets.get("LOGO_PATH"),
+        os.getenv("LOGO_URL"),
+        os.getenv("APP_LOGO_URL"),
+        "logo.png",
+        "assets/logo.png",
+        "static/logo.png",
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        c = str(c)
+        if c.startswith(("http://", "https://")):
+            return ("url", c)
+        p = Path(c)
+        if p.exists():
+            return ("file", str(p))
+    return (None, None)
+
+def _show_logo_in_login():
+    """Muestra el logo a la derecha del formulario de login."""
+    kind, src = _resolve_logo_src()
+    if not src:
+        return
+    st.image(src, use_column_width=True)
+
+def _place_logo_top_right():
+    """Inserta un logo fijo arriba a la derecha cuando ya está autenticado."""
+    kind, src = _resolve_logo_src()
+    if not src:
+        return
+    if kind == "file":
+        data = Path(src).read_bytes()
+        b64 = base64.b64encode(data).decode("utf-8")
+        url = f"data:image/png;base64,{b64}"
+    else:
+        url = src
+    st.markdown(
+        f"""
+        <div style="position:fixed; top:8px; right:12px; z-index:9999;">
+            <img src="{url}" style="height:42px;"/>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # LOGIN (mismo esquema USER/PASSWORD; + logo)
 # ---------------------------
 if "authenticated" not in st.session_state:
@@ -1430,4 +1494,5 @@ elif ss.menu_sel == "Diagnóstico IA":
         else: st.info("No se pudo determinar la cuota.")
         if diag["usage_tokens"] is not None: st.caption(f"Tokens: {diag['usage_tokens']}")
         if diag["error"]: st.warning(f"Detalle: {diag['error']}")
+
 
