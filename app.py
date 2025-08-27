@@ -1,5 +1,5 @@
 # app.py
-# Controller Financiero IA — build: 2025-08-27 focus-v7
+# Controller Financiero IA — build: 2025-08-27 focus-v7b
 
 import streamlit as st
 import pandas as pd
@@ -16,10 +16,10 @@ from streamlit.components.v1 import html as st_html
 
 from analizador import analizar_datos_taller
 
-APP_BUILD = "build-2025-08-27-focus-v7"
+APP_BUILD = "build-2025-08-27-focus-v7b"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
-# -----------------------------  Estilo general  -----------------------------
+# ======== Estilo ========
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"]{
@@ -45,7 +45,7 @@ ss.setdefault("menu_sel", "KPIs")
 ss.setdefault("roles_forced", {})
 ss.setdefault("_wkey", 0)
 
-# -----------------------------  Carga de datos  -----------------------------
+# ======== Carga de datos ========
 @st.cache_data(show_spinner=False, ttl=300)
 def load_excel(file):
     return pd.read_excel(file, sheet_name=None)
@@ -60,7 +60,7 @@ def load_gsheet(json_keyfile: str, sheet_url: str):
     sheet = client.open_by_url(sheet_url)
     return {ws.title: pd.DataFrame(ws.get_all_records()) for ws in sheet.worksheets()}
 
-# -----------------------------  OpenAI utils  -------------------------------
+# ======== OpenAI ========
 def _get_openai_client():
     api_key = (st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key") or
                os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
@@ -124,7 +124,7 @@ def diagnosticar_openai():
         res["quota_ok"] = None
     return res
 
-# -----------------------------  Limpieza/format  ----------------------------
+# ======== Limpieza / formato ========
 ALL_SPACES_RE = re.compile(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]')
 INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')
 TITLE_LINE_RE = re.compile(r'^(#{1,6}\s+[^\n]+)$', re.M)
@@ -133,6 +133,10 @@ CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 ARTIFACT_DOLLAR_BETWEEN_GROUPS = re.compile(r'(?<=[\.,])\$(?=\d{3}\b)')
+
+def fmt_money(x):
+    try: return f"${int(round(float(x))):,}".replace(",", ".")
+    except: return str(x)
 
 def fix_peso_artifacts(t: str) -> str:
     if not t: return t
@@ -146,12 +150,6 @@ def _space_punct_outside_numbers(s: str) -> str:
     s = re.sub(r',(?=[^\d\s])', ', ', s)
     s = re.sub(r':(?=[^\s])', ': ', s)
     return s
-
-def fmt_money(x):
-    try:
-        return f"${int(round(float(x))):,}".replace(",", ".")
-    except Exception:
-        return str(x)
 
 def prettify_answer(text: str) -> str:
     if not text: return text
@@ -234,25 +232,18 @@ def render_ia_html_block(text: str, height: int = 560):
     </style></head><body>{safe_html}</body></html>"""
     st_html(page, height=height, scrolling=True)
 
-# -----------------------------  Ejes y números ------------------------------
-def _fmt_pesos(x, pos=None):  # SOLO para ejes de moneda
-    try:
-        return f"${int(round(float(x))):,}".replace(",", ".")
-    except Exception:
-        return ""
-
+# ======== Ejes / Números ========
+def _fmt_pesos(x, pos=None):
+    try: return f"${int(round(float(x))):,}".replace(",", ".")
+    except: return ""
 def _fmt_int_axis(x, pos=None):
-    try:
-        return f"{int(round(float(x))):,}".replace(",", ".")
-    except Exception:
-        return ""
-
+    try: return f"{int(round(float(x))):,}".replace(",", ".")
+    except: return ""
 def _fmt_number_general(x):
-    try:
-        return f"{int(round(float(x))):,}".replace(",", ".")
+    try: return f"{int(round(float(x))):,}".replace(",", ".")
     except: return str(x)
 
-# -----------------------------  Helpers genéricos ---------------------------
+# ======== Helpers ========
 def _unique_key(prefix: str) -> str:
     ss._wkey += 1
     return f"{prefix}_{ss._wkey}"
@@ -330,7 +321,7 @@ def find_col(df: pd.DataFrame, name: str):
     candidates = [c for c in df.columns if tgt in _norm(c) or _norm(c).startswith(tgt[:4])]
     return candidates[0] if candidates else None
 
-# -----------------------------  Visualizaciones  ----------------------------
+# ======== Visualizaciones ========
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
@@ -344,6 +335,21 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     st.dataframe(resumen, use_container_width=True)
     st.download_button("⬇️ Descargar tabla (CSV)",
                        resumen.to_csv(index=False).encode("utf-8"),
+                       "tabla.csv", "text/csv",
+                       key=_unique_key("csv"))
+
+def mostrar_tabla_count(g: pd.DataFrame, cat_col: str, count_col: str, titulo: str):
+    df = g[[cat_col, count_col]].copy()
+    df = df.sort_values(count_col, ascending=False)
+    df.columns = ["Categoría", "OCs/OTs"]
+    df["OCs/OTs"] = df["OCs/OTs"].fillna(0).astype(int)
+    total = int(df["OCs/OTs"].sum())
+    df_total = pd.DataFrame([{"Categoría":"TOTAL","OCs/OTs": total}])
+    tabla = pd.concat([df, df_total], ignore_index=True)
+    st.markdown(f"### 📋 {titulo}")
+    st.dataframe(tabla, use_container_width=True)
+    st.download_button("⬇️ Descargar tabla (CSV)",
+                       tabla.to_csv(index=False).encode("utf-8"),
                        "tabla.csv", "text/csv",
                        key=_unique_key("csv"))
 
@@ -390,7 +396,6 @@ def _barras_horizontal_generic(resumen, titulo, as_money=True):
         st.caption(f"Descarga no disponible: {e}")
 
 def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None):
-    # MODO MONEDA (por compatibilidad hacia atrás)
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals)
                  .groupby(col_categoria, dropna=False)["__v"]
@@ -414,7 +419,6 @@ def mostrar_grafico_barras_v3(df, col_categoria, col_valor, titulo=None):
         _barras_vertical_generic(resumen, titulo or f"{col_valor} por {col_categoria}", True)
 
 def mostrar_grafico_barras_count(df, col_categoria, col_valor, titulo=None):
-    # MODO CONTEO (sin $)
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals)
                  .groupby(col_categoria, dropna=False)["__v"]
@@ -459,7 +463,7 @@ def mostrar_grafico_linea(df, x_col, y_col, titulo=None):
     except Exception as e:
         st.caption(f"Descarga no disponible: {e}")
 
-# -----------------------------  Finanzas resumen ----------------------------
+# ======== Finanzas resumen ========
 def _sheet_name_matches_finanzas(name: str) -> bool:
     n = _norm(name)
     return any(k in n for k in ["finanz", "finance"])
@@ -507,7 +511,7 @@ def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
     df_tab["Monto"] = df_tab["Monto"].apply(fmt_money)
     st.dataframe(df_tab, use_container_width=True)
 
-# -----------------------------  Pairs y conteos -----------------------------
+# ======== Pair finders ========
 def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable):
     best = None
     for h, df in data.items():
@@ -532,10 +536,8 @@ def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable
     return None, None, None, None
 
 def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callable):
-    # con dinero
     h, df, cat, val = find_best_pair_money(data, category_match)
     if h: return h, df, cat, val, "sum"
-    # numérico
     best = None
     for hh, ddf in data.items():
         if ddf is None or ddf.empty: continue
@@ -556,7 +558,6 @@ def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callab
     if best:
         hh, ddf, catc, pick, _ = best
         return hh, ddf, catc, pick, "sum"
-    # conteo
     for hh, ddf in data.items():
         if ddf is None or ddf.empty: continue
         roles = detect_roles_for_sheet(ddf, hh)
@@ -568,7 +569,7 @@ def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callab
 
 def make_count_df_by_id(df: pd.DataFrame, cat_col: str, roles: Dict[str,str]) -> Optional[pd.DataFrame]:
     id_cols = [c for c,r in roles.items() if r=="id"]
-    if not id_cols:  # sin id: cuenta filas
+    if not id_cols:
         g = df.groupby(cat_col, dropna=False).size().reset_index(name="__count__")
         return g
     idc = id_cols[0]
@@ -596,40 +597,7 @@ def best_count_by_category(data: Dict[str,pd.DataFrame], category_match: callabl
         return h, df, cat, g
     return None, None, None, None
 
-# -----------------------------  Bloques de la UI ----------------------------
-def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
-    def is_tipo_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
-    h1, df1, cat1, val1 = find_best_pair_money(data, is_tipo_cliente)
-    def is_proceso(n): return (("proceso" in n) or ("servicio" in n))
-    h2, df2, cat2, val2 = find_best_pair_money(data, is_proceso)
-
-    c1, c2 = st.columns(2)
-    if h1 and df1 is not None:
-        with c1: mostrar_grafico_torta(df1, cat1, val1, "Distribución por Tipo de Cliente")
-    else:
-        with c1: st.info("No encontré dinero + 'Tipo de cliente' para graficar.")
-    if h2 and df2 is not None:
-        with c2: mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
-    else:
-        with c2: st.info("No encontré dinero + 'Proceso' para graficar.")
-
-def detect_focus_from_question(q: str) -> dict:
-    qn = _norm(q)
-    if any(k in qn for k in ["patente", "patentes", "dominio"]):
-        return {"focus": "patentes", "cat_hints": ["patente", "patentes", "dominio"]}
-    if "cliente" in qn:
-        return {"focus": "clientes", "cat_hints": ["tipo de cliente", "tipo_cliente", "cliente", "segmento"]}
-    if any(k in qn for k in ["proceso", "servicio", "operacion", "operación", "recepcion", "reparacion", "reparación"]):
-        return {"focus": "procesos", "cat_hints": ["proceso", "tipo de proceso", "servicio", "servicios", "estado"]}
-    if any(k in qn for k in ["mes", "enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]):
-        return {"focus": "tiempo", "time": "month"}
-    if "año" in qn or "anio" in qn or "2024" in qn or "2025" in qn:
-        return {"focus": "tiempo", "time": "year"}
-    if "finanz" in qn or "factur" in qn or "ingreso" in qn or "egreso" in qn or "costo" in qn:
-        return {"focus": "finanzas", "cat_hints": ["categoria", "tipo", "glosa"]}
-    return {"focus": "general", "cat_hints": []}
-
-# -----------------------------  Insights & textos ---------------------------
+# ======== Insights & textos ========
 def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         kpis = analizar_datos_taller(data, "") or {}
@@ -643,7 +611,7 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
         for name in ["proceso","tipo de proceso","servicio","servicios","estado"]:
             if find_col(df, name): pcol = find_col(df, name); break
         vcol = None
-        for c,r in roles.items():
+        for c,r in roles.items(): 
             if r=="money": vcol = c; break
         if not pcol or not vcol: continue
         total = float(pd.to_numeric(df[vcol], errors="coerce").sum())
@@ -763,7 +731,6 @@ def compose_operational_text(data: Dict[str, Any]) -> str:
     return "\n".join(bloques)
 
 def compose_market_text(data: Dict[str, Any]) -> str:
-    # Top marcas y modelos por RECURRENCIA DE OCs/OTs (conteo de IDs únicos)
     def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
     def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
 
@@ -776,7 +743,6 @@ def compose_market_text(data: Dict[str, Any]) -> str:
     top_marca  = top_from_count(is_marca)
     top_modelo = top_from_count(is_modelo)
 
-    # Estacionalidad (fecha + monto si existe; si no, conteo de OTs)
     estac_txt = "—"
     for h, df in data.items():
         if df is None or df.empty: continue
@@ -825,7 +791,7 @@ def compose_market_text(data: Dict[str, Any]) -> str:
     ]
     return "\n".join(lines)
 
-# -----------------------------  Prompts LLM ---------------------------------
+# ======== Prompts LLM ========
 def make_system_prompt():
     return ("Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
             "Responde SIEMPRE con estilo ejecutivo + analítico y basándote EXCLUSIVAMENTE en la planilla.")
@@ -907,6 +873,22 @@ Pregunta:
 """
     return [{"role":"system","content":system}, *historial_msgs, {"role":"user","content":user}]
 
+def detect_focus_from_question(q: str) -> dict:
+    qn = _norm(q)
+    if any(k in qn for k in ["patente", "patentes", "dominio"]):
+        return {"focus": "patentes", "cat_hints": ["patente", "patentes", "dominio"]}
+    if "cliente" in qn:
+        return {"focus": "clientes", "cat_hints": ["tipo de cliente", "tipo_cliente", "cliente", "segmento"]}
+    if any(k in qn for k in ["proceso", "servicio", "operacion", "operación", "recepcion", "reparacion", "reparación"]):
+        return {"focus": "procesos", "cat_hints": ["proceso", "tipo de proceso", "servicio", "servicios", "estado"]}
+    if any(k in qn for k in ["mes", "enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]):
+        return {"focus": "tiempo", "time": "month"}
+    if "año" in qn or "anio" in qn or "2024" in qn or "2025" in qn:
+        return {"focus": "tiempo", "time": "year"}
+    if "finanz" in qn or "factur" in qn or "ingreso" in qn or "egreso" in qn or "costo" in qn:
+        return {"focus": "finanzas", "cat_hints": ["categoria", "tipo", "glosa"]}
+    return {"focus": "general", "cat_hints": []}
+
 def plan_from_llm(pregunta: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     system = "Eres un controller financiero experto. Devuelve SOLO JSON."
     prompt = f"""
@@ -959,7 +941,7 @@ PREGUNTA:
     try: return json.loads(m.group(0))
     except Exception: return {}
 
-# -----------------------------  Compute & Execute ---------------------------
+# ======== Compute & Execute ========
 def _apply_filters(df: pd.DataFrame, filters: List[Dict[str,str]]) -> pd.DataFrame:
     if not filters: return df
     out = df.copy()
@@ -1055,7 +1037,6 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
 
             if ccol:
                 if op == "count":
-                    # si el valor es id → contar distintos
                     if vrole == "id":
                         srs = dff.groupby(ccol, dropna=False)[vcol].nunique()
                     else:
@@ -1117,7 +1098,6 @@ def build_verified_summary(facts: dict) -> str:
     return encabezado + "\n".join(lines)
 
 def compose_focus_text(facts: dict, pregunta: str) -> str:
-    # Texto accionable y específico de la consulta ya calculada
     op     = (facts.get("op") or "sum").upper()
     vrole  = facts.get("value_role","unknown")
     vcol   = facts.get("value_col","valor")
@@ -1125,11 +1105,9 @@ def compose_focus_text(facts: dict, pregunta: str) -> str:
     rows   = facts.get("rows",0)
     total  = facts.get("total",0)
     by_cat = facts.get("by_category", [])
-
     def _fmt(v):
         if vrole=="money" and op!="COUNT": return fmt_money(v)
         return _fmt_number_general(v)
-
     lines = [build_verified_summary(facts)]
     lines.append("### Diagnóstico")
     if cat and by_cat:
@@ -1142,8 +1120,6 @@ def compose_focus_text(facts: dict, pregunta: str) -> str:
             lines.append(f"- Siguientes → {det2}.")
     else:
         lines.append(f"- Resultado global: {_fmt(total)}.")
-
-    # Recomendaciones simples basadas en rol:
     recs = []
     if vrole=="money" and op in ("SUM","MAX"):
         recs.append("Ajustar mix hacia categorías con mejor margen.")
@@ -1154,10 +1130,9 @@ def compose_focus_text(facts: dict, pregunta: str) -> str:
     else:
         recs.append("Monitorizar tendencia en el tiempo para validar estabilidad.")
     lines.append("### Recomendaciones\n" + "\n".join([f"- {r}" for r in recs]))
-
     return "\n\n".join(lines)
 
-# -----------------------------  Interfaz ------------------------------------
+# ======== Interfaz ========
 st.title("🤖 Controller Financiero IA")
 
 with st.sidebar:
@@ -1181,7 +1156,7 @@ with st.sidebar:
         except Exception as e:
             st.caption(f"No pude inspeccionar funciones: {e}")
 
-# -----------------------------  Vistas --------------------------------------
+# ======== Vistas ========
 if ss.menu_sel == "Datos":
     st.markdown("### 📁 Datos")
     fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
@@ -1241,10 +1216,15 @@ elif ss.menu_sel == "Consulta IA":
     else:
         st.markdown("### 🤖 Consulta")
 
-        # Botonera arriba (5 botones)
-        cBtns = st.columns(5)
+        # Botones de análisis (arriba)
+        cBtns = st.columns(4)
         left, right = st.columns([0.58, 0.42])
-        pregunta = st.text_input("Pregunta", label_visibility="collapsed", placeholder="Escribe tu pregunta...")
+
+        # Línea de pregunta + responder (juntos)
+        qcol, bcol = st.columns([0.82, 0.18])
+        pregunta = qcol.text_input("Pregunta", label_visibility="collapsed",
+                                   placeholder="Escribe tu pregunta...")
+        responder_click = bcol.button("Responder")
 
         if cBtns[0].button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
@@ -1256,7 +1236,19 @@ elif ss.menu_sel == "Consulta IA":
             with right:
                 render_finance_table(data)
                 st.markdown("### Distribución por cliente y procesos")
-                render_cliente_y_proceso(data)
+                def is_tipo_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
+                h1, df1, cat1, val1 = find_best_pair_money(data, is_tipo_cliente)
+                def is_proceso(n): return (("proceso" in n) or ("servicio" in n))
+                h2, df2, cat2, val2 = find_best_pair_money(data, is_proceso)
+                cA, cB = st.columns(2)
+                if h1 and df1 is not None:
+                    with cA: mostrar_grafico_torta(df1, cat1, val1, "Distribución por Tipo de Cliente")
+                else:
+                    with cA: st.info("No encontré dinero + 'Tipo de cliente' para graficar.")
+                if h2 and df2 is not None:
+                    with cB: mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
+                else:
+                    with cB: st.info("No encontré dinero + 'Proceso' para graficar.")
             ss.historial.append({"pregunta":"Análisis general","respuesta":raw})
 
         if cBtns[1].button("💵 Análisis Financiero"):
@@ -1278,25 +1270,23 @@ elif ss.menu_sel == "Consulta IA":
             with left:
                 render_ia_html_block(compose_market_text(data), height=520)
             with right:
-                # Graficos por CONTEO de OCs/OTs
+                # TABLAS (no barras) para Top Marcas / Modelos por CONTEO de OCs/OTs
                 def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
                 def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
 
                 c_top = st.columns(2)
 
-                # Marcas
                 hM, dfM, catM, gM = best_count_by_category(data, is_marca)
                 with c_top[0]:
                     if hM:
-                        mostrar_grafico_barras_count(gM, catM, "__count__", "Top Marcas (por OCs/OTs)")
+                        mostrar_tabla_count(gM, catM, "__count__", "Top Marcas (por OCs/OTs)")
                     else:
                         st.info("Sin columna de **marca**.")
 
-                # Modelos
                 hMo, dfMo, catMo, gMo = best_count_by_category(data, is_modelo)
                 with c_top[1]:
                     if hMo:
-                        mostrar_grafico_barras_count(gMo, catMo, "__count__", "Top Modelos (por OCs/OTs)")
+                        mostrar_tabla_count(gMo, catMo, "__count__", "Top Modelos (por OCs/OTs)")
                     else:
                         st.info("Sin columna de **modelo**.")
 
@@ -1317,8 +1307,8 @@ elif ss.menu_sel == "Consulta IA":
                 if not found:
                     st.info("No encontré (fecha + monto) para estacionalidad.")
 
-        # Botón Responder (arriba, 5to botón)
-        if cBtns[4].button("Responder") and pregunta:
+        # ------- Responder (junto a la pregunta) -------
+        if responder_click and pregunta:
             schema = _build_schema(data)
             plan_c = plan_compute_from_llm(pregunta, schema)
             facts = execute_compute(plan_c, data)
@@ -1353,12 +1343,18 @@ elif ss.menu_sel == "Consulta IA":
                                     f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
                                 )
                             else:
-                                mostrar_grafico_barras_count(
-                                    df_res.rename(columns={facts["category_col"]: "CATEGORIA",
-                                                           "VALOR": "VALOR"}),
-                                    "CATEGORIA", "VALOR",
-                                    f"{facts['op'].upper()} de {facts['value_col']} por {facts['category_col']}"
-                                )
+                                # para conteos o no-moneda, uso tablas si está muy largo
+                                st.info("Distribución desbalanceada: muestro tabla para mejor lectura." if len(df_res)>15 else "")
+                                df_show = df_res.rename(columns={facts["category_col"]:"Categoría","VALOR":"Valor"}).copy()
+                                if facts.get("op","sum")=="count" or facts.get("value_role")!="money":
+                                    df_show["Valor"] = df_show["Valor"].apply(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+                                else:
+                                    df_show["Valor"] = df_show["Valor"].apply(fmt_money)
+                                st.markdown("### 📋 Resultado")
+                                st.dataframe(df_show, use_container_width=True)
+                                st.download_button("⬇️ Descargar tabla (CSV)",
+                                                   df_show.to_csv(index=False).encode("utf-8"),
+                                                   "resultado.csv","text/csv", key=_unique_key("csv"))
                         except Exception as e:
                             st.error(f"Error graficando: {e}")
                             st.dataframe(df_res, use_container_width=True)
