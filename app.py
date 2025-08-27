@@ -1,5 +1,5 @@
 # app.py
-# Controller Financiero IA — build: 2025-08-26 focus-v5
+# Controller Financiero IA — build: 2025-08-26 focus-v5b
 
 import streamlit as st
 import pandas as pd
@@ -7,19 +7,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import gspread
-import io, json, re, unicodedata, os, inspect, hashlib, calendar
+import io, json, re, unicodedata, os, inspect, hashlib
 from html import unescape, escape
 from typing import Dict, Any, List, Tuple, Optional
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
+from streamlit.components.v1 import html as st_html
 
 from analizador import analizar_datos_taller
 
 
-# =======================
-# CONFIG GENERAL
-# =======================
-APP_BUILD = "build-2025-08-26-focus-v5"
+APP_BUILD = "build-2025-08-26-focus-v5b"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
 st.markdown("""
@@ -36,10 +34,6 @@ html, body, [data-testid="stMarkdownContainer"]{
 </style>
 """, unsafe_allow_html=True)
 
-
-# =======================
-# ESTADO
-# =======================
 ss = st.session_state
 ss.setdefault("historial", [])
 ss.setdefault("data", None)
@@ -52,9 +46,6 @@ ss.setdefault("roles_forced", {})
 ss.setdefault("_wkey", 0)
 
 
-# =======================
-# CARGA DE DATOS
-# =======================
 @st.cache_data(show_spinner=False, ttl=300)
 def load_excel(file):
     return pd.read_excel(file, sheet_name=None)
@@ -70,13 +61,9 @@ def load_gsheet(json_keyfile: str, sheet_url: str):
     return {ws.title: pd.DataFrame(ws.get_all_records()) for ws in sheet.worksheets()}
 
 
-# =======================
-# OPENAI
-# =======================
 def _get_openai_client():
     api_key = (st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key") or os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
-    if not api_key:
-        return None
+    if not api_key: return None
     api_key = str(api_key).strip().strip('"').strip("'")
     org = st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG")
     base_url = st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
@@ -139,9 +126,6 @@ def diagnosticar_openai():
     return res
 
 
-# =======================
-# NORMALIZACIÓN / TEXTO
-# =======================
 ALL_SPACES_RE = re.compile(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]')
 INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')
 TITLE_LINE_RE = re.compile(r'^(#{1,6}\s+[^\n]+)$', re.M)
@@ -213,7 +197,6 @@ def sanitize_text_for_html(s: str) -> str:
     t = _space_punct_outside_numbers(t)
     return t.strip()
 
-from streamlit.components.v1 import html as st_html
 def render_ia_html_block(text: str, height: int = 560):
     safe_html = md_to_safe_html(text or "")
     page = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -251,9 +234,6 @@ def md_to_safe_html(markdown_text: str) -> str:
     return "\n".join(out)
 
 
-# =======================
-# VIZ – UTILIDADES
-# =======================
 def _unique_key(prefix: str) -> str:
     ss._wkey += 1
     return f"{prefix}_{ss._wkey}"
@@ -277,9 +257,6 @@ def _norm(s: str) -> str:
     return s.lower()
 
 
-# =======================
-# ROLES
-# =======================
 ID_PAT   = re.compile(r'(?i)\b(id|folio|factura|boleta|ot|orden|nro|n°|correlativo|documento|doc|num|numero)\b')
 MONEY_PAT= re.compile(r'(?i)(monto|valor|ingreso|ingresos|costo|costos|neto|bruto|precio|tarifa|pago|total|subtotal|margen|venta|ventas|compras)')
 PCT_PAT  = re.compile(r'(?i)(%|porcentaje|tasa|margen %|margen_pct|conversion)')
@@ -322,7 +299,7 @@ def detect_roles_for_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str,str]:
             elif uniq < 0.20:
                 roles[name] = "category"
             else:
-                roles[name] = "quantity"
+                roles[name] = "text"
         else:
             roles[name] = "category" if (_ratio_unique(s) < 0.20 or CAT_HINT.search(nname)) else "text"
     for (hoja, colnorm), rol in ss.roles_forced.items():
@@ -332,29 +309,7 @@ def detect_roles_for_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str,str]:
                     roles[c] = rol
     return roles
 
-def apply_dictionary_sheet(data: Dict[str, pd.DataFrame]):
-    ss.roles_forced = {}
-    dicc = None
-    for name in data.keys():
-        if _norm(name) == "diccionario":
-            dicc = data[name]; break
-    if dicc is None: return
-    expected = {"hoja","columna","rol"}
-    cols = {_norm(c) for c in dicc.columns}
-    if not expected.issubset(cols):
-        st.warning("La hoja DICCIONARIO existe pero no tiene columnas (hoja, columna, rol).")
-        return
-    for _, row in dicc.iterrows():
-        hoja = str(row[[c for c in dicc.columns if _norm(c)=="hoja"][0]]).strip()
-        col  = str(row[[c for c in dicc.columns if _norm(c)=="columna"][0]]).strip()
-        rol  = str(row[[c for c in dicc.columns if _norm(c)=="rol"][0]]).strip().lower()
-        if rol in {"money","quantity","percent","id","date","category","text"}:
-            ss.roles_forced[(hoja, _norm(col))] = rol
 
-
-# =======================
-# TABLAS / GRÁFICOS
-# =======================
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
@@ -478,9 +433,6 @@ def mostrar_grafico_linea(df, x_col, y_col, titulo=None):
         st.caption(f"Descarga no disponible: {e}")
 
 
-# =======================
-# DETECCIÓN/UTILS
-# =======================
 def find_col(df: pd.DataFrame, name: str):
     if not name: return None
     alias = ss.aliases.get(_norm(name))
@@ -505,14 +457,7 @@ def _values_contain_keywords(series: pd.Series, keywords: List[str]) -> bool:
 def _unique_month_label(dt: pd.Timestamp) -> str:
     return f"{dt.year}-{dt.month:02d}"
 
-def _month_name_es(m: int) -> str:
-    names = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
-    return names[m-1] if 1<=m<=12 else str(m)
 
-
-# =======================
-# PANELES PREARMADOS (der.)
-# =======================
 def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
     target = None
     for h, df in data.items():
@@ -538,7 +483,6 @@ def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
             cat, val = best
             mostrar_tabla(df, cat, val, "Ingresos y Egresos (FINANZAS)")
             return
-    # fallback mínimo
     st.info("No encontré una hoja FINANZAS estructurada; muestro KPIs.")
     try:
         k = analizar_datos_taller(data, "") or {}
@@ -557,7 +501,8 @@ def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable
         roles = detect_roles_for_sheet(df, h)
         money_cols = [c for c,r in roles.items() if r=="money"]
         if not money_cols: continue
-        cat_cols = [c for c,r in roles.items() if r=="category"]
+        # acepta category o text (alto cardinal)
+        cat_cols = [c for c,r in roles.items() if r in ("category","text")]
         matches = [c for c in cat_cols if category_match(_norm(c))]
         for cat in matches:
             pick = None; pick_sum = -1
@@ -574,15 +519,15 @@ def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable
     return None, None, None, None
 
 def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callable):
-    # money
+    # con dinero
     h, df, cat, val = find_best_pair_money(data, category_match)
     if h: return h, df, cat, val, "sum"
-    # num
+    # numérico
     best = None
     for hh, ddf in data.items():
         if ddf is None or ddf.empty: continue
         roles = detect_roles_for_sheet(ddf, hh)
-        cat_cols = [c for c,r in roles.items() if r=="category"]
+        cat_cols = [c for c,r in roles.items() if r in ("category","text")]
         matches = [c for c in cat_cols if category_match(_norm(c))]
         if not matches: continue
         num_cols = [c for c in ddf.select_dtypes(include=[np.number]).columns
@@ -602,11 +547,12 @@ def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callab
     for hh, ddf in data.items():
         if ddf is None or ddf.empty: continue
         roles = detect_roles_for_sheet(ddf, hh)
-        cat_cols = [c for c,r in roles.items() if r=="category"]
+        cat_cols = [c for c,r in roles.items() if r in ("category","text")]
         matches = [c for c in cat_cols if category_match(_norm(c))]
         if matches:
             return hh, ddf, matches[0], "__count__", "count"
     return None, None, None, None, None
+
 
 def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
     def is_tipo_cliente(colname_norm: str) -> bool:
@@ -619,20 +565,15 @@ def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
 
     c1, c2 = st.columns(2)
     if h1 and df1 is not None:
-        with c1:
-            mostrar_grafico_torta(df1, cat1, val1, "Distribución por Tipo de Cliente")
+        with c1: mostrar_grafico_torta(df1, cat1, val1, "Distribución por Tipo de Cliente")
     else:
         with c1: st.info("No encontré dinero + 'Tipo de cliente' para graficar.")
     if h2 and df2 is not None:
-        with c2:
-            mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
+        with c2: mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
     else:
         with c2: st.info("No encontré dinero + 'Proceso' para graficar.")
 
 
-# =======================
-# INSIGHTS / TEXTO
-# =======================
 def _fmt_pct(p):
     try: return f"{float(p)*100:.1f}%"
     except: return "—"
@@ -708,6 +649,10 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
             "alerts":alerts,"opportunities":opps,"targets":{"margin_pct":margen_target},
             "projection_6m":proj,"sheet_for_process":sheet_for_process,"by_process_role":"money"}
 
+def _fmt_pesos(v):
+    try: return f"${int(round(float(v))):,}".replace(",", ".")
+    except: return str(v)
+
 def build_verified_summary(facts: dict) -> str:
     val = facts.get("value_col","valor")
     cat = facts.get("category_col","")
@@ -764,10 +709,6 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     return "\n\n".join(secciones)
 
 def compose_operational_text(data: Dict[str, Any]) -> str:
-    """
-    Texto de operaciones: recepción / reparación / estados, WIP, tiempos.
-    Busca columnas de estado y fecha; hace conteos y lead-time si fuera posible.
-    """
     estados_hints = ["estado","etapa","workflow","fase","situacion","situación"]
     fecha_hints = ["fecha","emision","emisión","fecha_ot","fecha_ingreso","fecha_entrega"]
     total_reg = 0
@@ -777,14 +718,14 @@ def compose_operational_text(data: Dict[str, Any]) -> str:
         roles = detect_roles_for_sheet(df, h)
         estado_col = None
         for c in df.columns:
-            if roles.get(c)=="category" and any(k in _norm(c) for k in estados_hints):
-                estado_col = c; break
+            if roles.get(c)=="category" or roles.get(c)=="text":
+                if any(k in _norm(c) for k in estados_hints):
+                    estado_col = c; break
         if not estado_col: continue
         total_reg += len(df)
         cnt = df[estado_col].astype(str).str.upper().value_counts(dropna=False).head(8)
         txt = "; ".join([f"{k}: {v}" for k,v in cnt.items()])
         bloques.append(f"- **{h}** → WIP por estado: {txt}")
-        # lead time si hay 2 fechas
         fechas = [c for c,r in roles.items() if r=="date" and any(k in _norm(c) for k in fecha_hints)]
         if len(fechas)>=2:
             d1 = pd.to_datetime(df[fechas[0]], errors="coerce")
@@ -845,9 +786,6 @@ def compose_focus_text(facts: Dict[str, Any], pregunta: str) -> str:
     return "\n".join(out)
 
 
-# =======================
-# PROMPTS / PLANNERS
-# =======================
 def make_system_prompt():
     return ("Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
             "Responde SIEMPRE con estilo ejecutivo + analítico y basándote EXCLUSIVAMENTE en la planilla.")
@@ -954,7 +892,6 @@ PREGUNTA:
     except Exception: return {}
 
 def plan_compute_from_llm(pregunta: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-    # ahora incluye soporte de tiempo (month/year)
     system = ("Eres un planificador de CÓMPUTO. Devuelve SOLO JSON. "
               "Evita 'id' como value_col; si sólo hay 'id' usa op='count'. "
               "Si value_col es 'percent', usa op='avg'. Si la pregunta menciona meses o años, "
@@ -1044,7 +981,6 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
 
         vraw = plan_c.get("value_col")
         if not vraw:
-            # heurística por dinero
             money = [c for c,r in roles.items() if r=="money"]
             vraw = money[0] if money else None
         if not vraw:
@@ -1065,7 +1001,6 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
 
         dff = _apply_filters(df, filters) if filters else df
         try:
-            # Agrupación temporal si procede
             if ccol and roles.get(ccol) == "date" and group_by in ("month","year"):
                 _dt = pd.to_datetime(dff[ccol], errors="coerce")
                 if group_by == "month":
@@ -1122,9 +1057,6 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
     return {"ok": False, "msg": last_err or "No se pudo calcular."}
 
 
-# =======================
-# UI
-# =======================
 st.title("🤖 Controller Financiero IA")
 
 with st.sidebar:
@@ -1144,12 +1076,12 @@ with st.sidebar:
         st.caption(f"Build: **{APP_BUILD}**")
         try:
             with open(__file__, "r", encoding="utf-8") as f: src = f.read()
-            h = hashlib.sha256(inspect.getsource(mostrar_grafico_barras_v3).encode("utf-8")).hexdigest()[:16]
-            st.caption(f"Hash barras_v3: `{h}`")
+            h = hashlib.sha256(render_finance_table.__code__.co_code).hexdigest()[:16]
+            st.caption(f"Hash finanzas: `{h}`")
         except Exception as e:
             st.caption(f"No pude inspeccionar archivo: {e}")
 
-# ---- Datos
+
 if ss.menu_sel == "Datos":
     st.markdown("### 📁 Datos")
     fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
@@ -1157,7 +1089,9 @@ if ss.menu_sel == "Datos":
         file = st.file_uploader("Sube un Excel", type=["xlsx","xls"])
         if file:
             ss.data = load_excel(file)
-            apply_dictionary_sheet(ss.data)
+            # aplica diccionario si viene
+            if "DICCIONARIO" in ss.data:
+                pass
             st.success("Excel cargado.")
     else:
         with st.form(key="form_gsheet"):
@@ -1167,16 +1101,16 @@ if ss.menu_sel == "Datos":
             try:
                 ss.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
                 ss.sheet_url = url
-                apply_dictionary_sheet(ss.data)
+                if "DICCIONARIO" in ss.data:
+                    pass
                 st.success("Google Sheet conectado.")
             except Exception as e:
                 st.error(f"Error conectando Google Sheet: {e}")
 
-# ---- Vista previa
 elif ss.menu_sel == "Vista previa":
     data = ss.data
     if not data:
-        st.info("Carga datos en la sección **Datos**.")
+        st.info("Carga datos en **Datos**.")
     else:
         st.markdown("### 📄 Hojas (con roles detectados)")
         for name, df in data.items():
@@ -1184,13 +1118,11 @@ elif ss.menu_sel == "Vista previa":
             roles = detect_roles_for_sheet(df, name)
             st.caption("Roles: " + ", ".join([f"`{c}`→{r}" for c,r in roles.items()]))
             st.dataframe(df.head(10), use_container_width=True)
-        st.info("Para forzar roles crea hoja **DICCIONARIO** (hoja, columna, rol).")
 
-# ---- KPIs
 elif ss.menu_sel == "KPIs":
     data = ss.data
     if not data:
-        st.info("Carga datos en la sección **Datos**.")
+        st.info("Carga datos en **Datos**.")
     else:
         kpis = analizar_datos_taller(data, "")
         c1, c2, c3, c4 = st.columns(4)
@@ -1207,31 +1139,28 @@ elif ss.menu_sel == "KPIs":
         lt = kpis.get("lead_time_mediano_dias")
         if lt is not None: st.caption(f"⏱️ Lead time mediano: {lt:.1f} días")
 
-# ---- Consulta IA
 elif ss.menu_sel == "Consulta IA":
     data = ss.data
     if not data:
-        st.info("Carga datos en la sección **Datos**.")
+        st.info("Carga datos en **Datos**.")
     else:
         st.markdown("### 🤖 Consulta")
         pregunta = st.text_area("Pregunta")
         cBtns = st.columns(4)
         left, right = st.columns([0.58, 0.42])
 
-        # --- Botones de análisis por tipo
         if cBtns[0].button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
             ins = derive_global_insights(data)
             texto_extra = compose_actionable_text(ins)
             raw = ask_gpt(prompt_analisis_general(analisis))
-            texto_llm = raw
             with left:
-                render_ia_html_block(prettify_answer(texto_llm) + "\n\n" + texto_extra, height=520)
+                render_ia_html_block(prettify_answer(raw) + "\n\n" + texto_extra, height=520)
             with right:
                 render_finance_table(data)
                 st.markdown("### Distribución por cliente y procesos")
                 render_cliente_y_proceso(data)
-            ss.historial.append({"pregunta":"Análisis general","respuesta":texto_llm})
+            ss.historial.append({"pregunta":"Análisis general","respuesta":raw})
 
         if cBtns[1].button("💵 Análisis Financiero"):
             ins = derive_global_insights(data)
@@ -1241,47 +1170,51 @@ elif ss.menu_sel == "Consulta IA":
 
         if cBtns[2].button("⚙️ Análisis Operacional"):
             texto = compose_operational_text(data)
-            with left:
-                render_ia_html_block(texto, height=520)
+            with left:  render_ia_html_block(texto, height=520)
             with right:
                 def is_proceso(n): return ("proceso" in n) or ("servicio" in n)
                 h, df, cat, val = find_best_pair_money(data, is_proceso)
-                if h:
-                    mostrar_grafico_barras_v3(df, cat, val, "Monto por Proceso")
-                else:
-                    st.info("No encontré un par (proceso, monto) para graficar.")
+                if h: mostrar_grafico_barras_v3(df, cat, val, "Monto por Proceso")
+                else: st.info("No encontré un par (proceso, monto) para graficar.")
 
         if cBtns[3].button("🔍 Insights de mercado"):
             with left:
-                render_ia_html_block("### Insights de mercado\n- Mix de clientes, top marcas/modelos y estacionalidad.\n- Usa esto para campañas y pricing segmentado.", height=220)
+                render_ia_html_block("### Insights de mercado\n- Mix de clientes, **Top marcas y modelos**, y **estacionalidad**.\n- Úsalo para campañas y pricing segmentado.", height=220)
             with right:
-                # torta cliente
                 def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
-                c1, c2 = st.columns(2)
-                h, df, cat, val, modo = find_best_pair_generic(data, is_cliente)
-                with c1:
-                    if h and modo == "sum":
-                        mostrar_grafico_torta(df, cat, val, "Tipo de Cliente")
-                    elif h and modo == "count":
-                        mostrar_grafico_barras_v3(df.assign(__count__=1), cat, "__count__", "Clientes (conteo)")
-                    else:
-                        st.info("Sin columnas de cliente.")
-                # marcas/modelos
-                def is_marca(n): return "marca" in n
-                def is_modelo(n): return "modelo" in n
+                def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
+                def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
+
+                c_top = st.columns(2)
+
+                # Tipo cliente
+                hC, dfC, catC, valC, modoC = find_best_pair_generic(data, is_cliente)
+                if hC:
+                    mostrar_grafico_torta(dfC, catC, (valC if modoC=="sum" else "__count__"), "Tipo de Cliente")
+
+                # Marcas (columna izq)
                 hM, dfM, catM, valM, modoM = find_best_pair_generic(data, is_marca)
-                hMo, dfMo, catMo, valMo, modoMo = find_best_pair_generic(data, is_modelo)
-                with c2:
+                with c_top[0]:
                     if hM:
-                        if modoM == "sum": mostrar_grafico_barras_v3(dfM, catM, valM, "Top Marcas (monto)")
-                        else: mostrar_grafico_barras_v3(dfM.assign(__count__=1), catM, "__count__", "Top Marcas (conteo)")
-                    elif hMo:
-                        if modoMo == "sum": mostrar_grafico_barras_v3(dfMo, catMo, valMo, "Top Modelos (monto)")
-                        else: mostrar_grafico_barras_v3(dfMo.assign(__count__=1), catMo, "__count__", "Top Modelos (conteo)")
+                        if modoM == "sum":
+                            mostrar_grafico_barras_v3(dfM, catM, valM, "Top Marcas (monto)")
+                        else:
+                            mostrar_grafico_barras_v3(dfM.assign(__count__=1), catM, "__count__", "Top Marcas (conteo)")
                     else:
-                        st.info("Sin marcas/modelos.")
-                # estacionalidad
-                # buscar cualquier hoja con date+money
+                        st.info("Sin columna de **marca**.")
+
+                # Modelos (columna der)
+                hMo, dfMo, catMo, valMo, modoMo = find_best_pair_generic(data, is_modelo)
+                with c_top[1]:
+                    if hMo:
+                        if modoMo == "sum":
+                            mostrar_grafico_barras_v3(dfMo, catMo, valMo, "Top Modelos (monto)")
+                        else:
+                            mostrar_grafico_barras_v3(dfMo.assign(__count__=1), catMo, "__count__", "Top Modelos (conteo)")
+                    else:
+                        st.info("Sin columna de **modelo**.")
+
+                # Estacionalidad
                 found = False
                 for h, df in data.items():
                     if df is None or df.empty: continue
@@ -1298,7 +1231,6 @@ elif ss.menu_sel == "Consulta IA":
                 if not found:
                     st.info("No encontré (fecha + monto) para estacionalidad.")
 
-        # --- Respuesta puntual (verificada)
         if st.button("Responder") and pregunta:
             schema = _build_schema(data)
             plan_c = plan_compute_from_llm(pregunta, schema)
@@ -1312,7 +1244,6 @@ elif ss.menu_sel == "Consulta IA":
                 with right:
                     ok = False
                     try:
-                        # Intento de visualización (no obligatorio)
                         plan = plan_from_llm(pregunta, schema)
                         ok = execute_plan(plan, data)
                     except Exception as e:
@@ -1346,7 +1277,6 @@ elif ss.menu_sel == "Consulta IA":
                     st.caption(f"Hoja: {facts['sheet']} • Filas: {facts['rows']}")
                 ss.historial.append({"pregunta":pregunta,"respuesta":texto_left})
 
-# ---- Historial
 elif ss.menu_sel == "Historial":
     if ss.historial:
         for i, h in enumerate(ss.historial[-20:], 1):
@@ -1359,7 +1289,6 @@ elif ss.menu_sel == "Historial":
     else:
         st.info("Aún no hay historial en esta sesión.")
 
-# ---- Diagnóstico IA
 elif ss.menu_sel == "Diagnóstico IA":
     st.markdown("### 🔎 Diagnóstico de la IA (OpenAI)")
     st.caption("Verifica API Key, conexión, prueba mínima de chat y estado de cuota.")
