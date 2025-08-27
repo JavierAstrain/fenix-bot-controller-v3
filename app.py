@@ -45,6 +45,42 @@ ss.setdefault("menu_sel", "KPIs")
 ss.setdefault("roles_forced", {})
 ss.setdefault("_wkey", 0)
 
+# ---------------------------
+# LOGIN (mismo esquema USER/PASSWORD; + logo)
+# ---------------------------
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def login():
+    st.markdown("## 🔐 Iniciar sesión")
+    # Dos columnas: formulario a la izquierda, logo a la derecha
+    c_form, c_logo = st.columns([0.62, 0.38])
+    with c_form:
+        username = st.text_input("Usuario", value=st.session_state.get("_last_user", ""))
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Iniciar sesión"):
+            try_user = st.secrets.get("USER", None)
+            try_pass = st.secrets.get("PASSWORD", None)
+            if try_user is None or try_pass is None:
+                st.error("Secrets USER/PASSWORD no configurados. Agrega USER y PASSWORD en secrets.toml / Cloud.")
+                return
+            if username == try_user and password == try_pass:
+                st.session_state.authenticated = True
+                st.session_state._last_user = username
+                st.rerun()
+            else:
+                st.error("Credenciales incorrectas")
+    with c_logo:
+        _show_logo_in_login()  # ← logo a la derecha del login
+
+if not st.session_state.authenticated:
+    login()
+    st.stop()
+else:
+    # Usuario autenticado: logo fijo arriba-derecha
+    _place_logo_top_right()
+
+
 # ======== Carga de datos ========
 @st.cache_data(show_spinner=False, ttl=300)
 def load_excel(file):
@@ -1394,3 +1430,4 @@ elif ss.menu_sel == "Diagnóstico IA":
         else: st.info("No se pudo determinar la cuota.")
         if diag["usage_tokens"] is not None: st.caption(f"Tokens: {diag['usage_tokens']}")
         if diag["error"]: st.warning(f"Detalle: {diag['error']}")
+
