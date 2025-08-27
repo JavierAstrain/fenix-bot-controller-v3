@@ -1,5 +1,5 @@
 # app.py
-# Controller Financiero IA — build: 2025-08-26 focus-v5b
+# Controller Financiero IA — build: 2025-08-27 focus-v6
 
 import streamlit as st
 import pandas as pd
@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import gspread
-import io, json, re, unicodedata, os, inspect, hashlib
+import io, json, re, unicodedata, os, hashlib
 from html import unescape, escape
 from typing import Dict, Any, List, Tuple, Optional
 from google.oauth2.service_account import Credentials
@@ -16,10 +16,10 @@ from streamlit.components.v1 import html as st_html
 
 from analizador import analizar_datos_taller
 
-
-APP_BUILD = "build-2025-08-26-focus-v5b"
+APP_BUILD = "build-2025-08-27-focus-v6"
 st.set_page_config(layout="wide", page_title="Controller Financiero IA")
 
+# -----------------------------  Estilo general  -----------------------------
 st.markdown("""
 <style>
 html, body, [data-testid="stMarkdownContainer"]{
@@ -45,7 +45,7 @@ ss.setdefault("menu_sel", "KPIs")
 ss.setdefault("roles_forced", {})
 ss.setdefault("_wkey", 0)
 
-
+# -----------------------------  Carga de datos  -----------------------------
 @st.cache_data(show_spinner=False, ttl=300)
 def load_excel(file):
     return pd.read_excel(file, sheet_name=None)
@@ -60,9 +60,10 @@ def load_gsheet(json_keyfile: str, sheet_url: str):
     sheet = client.open_by_url(sheet_url)
     return {ws.title: pd.DataFrame(ws.get_all_records()) for ws in sheet.worksheets()}
 
-
+# -----------------------------  OpenAI utils  -------------------------------
 def _get_openai_client():
-    api_key = (st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key") or os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
+    api_key = (st.secrets.get("OPENAI_API_KEY") or st.secrets.get("openai_api_key") or
+               os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
     if not api_key: return None
     api_key = str(api_key).strip().strip('"').strip("'")
     org = st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG")
@@ -70,10 +71,8 @@ def _get_openai_client():
     kw = {"api_key": api_key}
     if org: kw["organization"] = str(org).strip()
     if base_url: kw["base_url"] = str(base_url).strip()
-    try:
-        return OpenAI(**kw)
-    except:
-        return None
+    try: return OpenAI(**kw)
+    except: return None
 
 def ask_gpt(messages) -> str:
     client = _get_openai_client()
@@ -125,7 +124,7 @@ def diagnosticar_openai():
         res["quota_ok"] = None
     return res
 
-
+# -----------------------------  Limpieza/format  ----------------------------
 ALL_SPACES_RE = re.compile(r'[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]')
 INVISIBLES_RE = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00AD]')
 TITLE_LINE_RE = re.compile(r'^(#{1,6}\s+[^\n]+)$', re.M)
@@ -134,9 +133,6 @@ CURRENCY_DOT_RE   = re.compile(r'(?<![\w$])(\d{1,3}(?:\.\d{3})+)(?![\w%])')
 MILLONES_RE = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*millone?s\b')
 MILES_RE    = re.compile(r'(?i)\$?\s*(\d+(?:[.,]\d+)?)\s*mil\b')
 ARTIFACT_DOLLAR_BETWEEN_GROUPS = re.compile(r'(?<=[\.,])\$(?=\d{3}\b)')
-
-def _to_clp(i: int) -> str:
-    return f"${i:,}".replace(",", ".")
 
 def fix_peso_artifacts(t: str) -> str:
     if not t: return t
@@ -168,15 +164,15 @@ def prettify_answer(text: str) -> str:
     t = re.sub(r'(?i)\bmientrasque\b', 'mientras que', t)
     t = re.sub(r'(?i)(?:US|CLP|COP|S)\s*\$', '$', t)
     def _mill(m):
-        try: return _to_clp(int(round(float(m.group(1).replace(",","."))*1_000_000)))
+        try: return fmt_money(int(round(float(m.group(1).replace(",","."))*1_000_000)))
         except: return m.group(0)
     def _mil(m):
-        try: return _to_clp(int(round(float(m.group(1).replace(",","."))*1_000)))
+        try: return fmt_money(int(round(float(m.group(1).replace(",","."))*1_000)))
         except: return m.group(0)
     t = MILLONES_RE.sub(_mill, t)
     t = MILES_RE.sub(_mil, t)
-    t = CURRENCY_COMMA_RE.sub(lambda m: _to_clp(int(m.group(1).replace(',',''))), t)
-    t = CURRENCY_DOT_RE.sub(  lambda m: _to_clp(int(m.group(1).replace('.',''))), t)
+    t = CURRENCY_COMMA_RE.sub(lambda m: fmt_money(int(m.group(1).replace(',',''))), t)
+    t = CURRENCY_DOT_RE.sub(  lambda m: fmt_money(int(m.group(1).replace('.',''))), t)
     t = fix_peso_artifacts(t)
     t = _space_punct_outside_numbers(t)
     return t.strip()
@@ -196,21 +192,6 @@ def sanitize_text_for_html(s: str) -> str:
     t = re.sub(r'\n\s+','\n', t)
     t = _space_punct_outside_numbers(t)
     return t.strip()
-
-def render_ia_html_block(text: str, height: int = 560):
-    safe_html = md_to_safe_html(text or "")
-    page = f"""<!doctype html><html><head><meta charset="utf-8">
-    <style>
-      :root {{ --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
-               "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif; }}
-      html,body {{ margin:0; padding:0; font: 15.5px/1.55 var(--font); }}
-      h3 {{ margin:0 0 .5rem; font-weight:700; }}
-      ul {{ margin:.25rem 0 .75rem 1.25rem; padding-left:1rem; }}
-      li,p {{ margin:.25rem 0; letter-spacing:.2px; white-space:normal; }}
-      em,i {{ font-style: normal !important; }}
-      code {{ font-family: inherit !important; background: transparent !important; }}
-    </style></head><body>{safe_html}</body></html>"""
-    st_html(page, height=height, scrolling=True)
 
 def md_to_safe_html(markdown_text: str) -> str:
     base = prettify_answer(markdown_text or "")
@@ -233,17 +214,38 @@ def md_to_safe_html(markdown_text: str) -> str:
     if ul: out.append("</ul>")
     return "\n".join(out)
 
+def render_ia_html_block(text: str, height: int = 560):
+    safe_html = md_to_safe_html(text or "")
+    page = f"""<!doctype html><html><head><meta charset="utf-8">
+    <style>
+      :root {{ --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu,
+               "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif; }}
+      html,body {{ margin:0; padding:0; font: 15.5px/1.55 var(--font); }}
+      h3 {{ margin:0 0 .5rem; font-weight:700; }}
+      ul {{ margin:.25rem 0 .75rem 1.25rem; padding-left:1rem; }}
+      li,p {{ margin:.25rem 0; letter-spacing:.2px; white-space:normal; }}
+      em,i {{ font-style: normal !important; }}
+      code {{ font-family: inherit !important; background: transparent !important; }}
+    </style></head><body>{safe_html}</body></html>"""
+    st_html(page, height=height, scrolling=True)
 
-def _unique_key(prefix: str) -> str:
-    ss._wkey += 1
-    return f"{prefix}_{ss._wkey}"
-
-def _fmt_pesos(x, pos=None):
+# -----------------------------  Formato de moneda ---------------------------
+def fmt_money(x):
     try:
-        if x is None or (isinstance(x, float) and np.isnan(x)): return ""
         return f"${int(round(float(x))):,}".replace(",", ".")
     except Exception:
         return str(x)
+
+def _fmt_pesos(x, pos=None):  # SOLO para ejes de Matplotlib
+    try:
+        return f"${int(round(float(x))):,}".replace(",", ".")
+    except Exception:
+        return ""
+
+# -----------------------------  Helpers genéricos ---------------------------
+def _unique_key(prefix: str) -> str:
+    ss._wkey += 1
+    return f"{prefix}_{ss._wkey}"
 
 def _export_fig(fig):
     buf = io.BytesIO()
@@ -255,7 +257,6 @@ def _norm(s: str) -> str:
     s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
     s = re.sub(r'\s+',' ', s)
     return s.lower()
-
 
 ID_PAT   = re.compile(r'(?i)\b(id|folio|factura|boleta|ot|orden|nro|n°|correlativo|documento|doc|num|numero)\b')
 MONEY_PAT= re.compile(r'(?i)(monto|valor|ingreso|ingresos|costo|costos|neto|bruto|precio|tarifa|pago|total|subtotal|margen|venta|ventas|compras)')
@@ -309,16 +310,26 @@ def detect_roles_for_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str,str]:
                     roles[c] = rol
     return roles
 
+def find_col(df: pd.DataFrame, name: str):
+    if not name: return None
+    alias = ss.aliases.get(_norm(name))
+    if alias and alias in df.columns: return alias
+    tgt = _norm(name)
+    for c in df.columns:
+        if _norm(c) == tgt: return c
+    candidates = [c for c in df.columns if tgt in _norm(c) or _norm(c).startswith(tgt[:4])]
+    return candidates[0] if candidates else None
 
+# -----------------------------  Visualizaciones  ----------------------------
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (df.assign(__v=vals).groupby(col_categoria, dropna=False)["__v"]
                  .sum().sort_values(ascending=False).reset_index())
     resumen.columns = [str(col_categoria).title(), str(col_valor).title()]
     col_val = resumen.columns[1]
-    resumen[col_val] = resumen[col_val].apply(_fmt_pesos)
+    resumen[col_val] = resumen[col_val].apply(fmt_money)
     total_val = vals.sum(skipna=True)
-    resumen.loc[len(resumen)] = ["TOTAL", _fmt_pesos(total_val)]
+    resumen.loc[len(resumen)] = ["TOTAL", fmt_money(total_val)]
     st.markdown(f"### 📊 {titulo if titulo else f'{col_val} por {col_categoria}'}")
     st.dataframe(resumen, use_container_width=True)
     st.download_button("⬇️ Descargar tabla (CSV)",
@@ -337,7 +348,7 @@ def _barras_vertical(resumen, col_categoria, col_valor, titulo):
     for b in bars:
         y = b.get_height()
         if np.isfinite(y):
-            ax.annotate(_fmt_pesos(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
+            ax.annotate(fmt_money(y), (b.get_x()+b.get_width()/2, y), textcoords="offset points",
                         xytext=(0,3), ha='center', va='bottom', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
@@ -356,7 +367,7 @@ def _barras_horizontal(resumen, col_categoria, col_valor, titulo):
     for b in bars:
         x = b.get_width()
         if np.isfinite(x):
-            ax.annotate(_fmt_pesos(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
+            ax.annotate(fmt_money(x), (x, b.get_y()+b.get_height()/2), textcoords="offset points",
                         xytext=(5,0), ha='left', va='center', fontsize=8)
     fig.tight_layout()
     st.pyplot(fig)
@@ -432,17 +443,7 @@ def mostrar_grafico_linea(df, x_col, y_col, titulo=None):
     except Exception as e:
         st.caption(f"Descarga no disponible: {e}")
 
-
-def find_col(df: pd.DataFrame, name: str):
-    if not name: return None
-    alias = ss.aliases.get(_norm(name))
-    if alias and alias in df.columns: return alias
-    tgt = _norm(name)
-    for c in df.columns:
-        if _norm(c) == tgt: return c
-    candidates = [c for c in df.columns if tgt in _norm(c) or _norm(c).startswith(tgt[:4])]
-    return candidates[0] if candidates else None
-
+# -----------------------------  Finanzas resumen ----------------------------
 def _sheet_name_matches_finanzas(name: str) -> bool:
     n = _norm(name)
     return any(k in n for k in ["finanz", "finance"])
@@ -453,10 +454,6 @@ def _values_contain_keywords(series: pd.Series, keywords: List[str]) -> bool:
         return any(k in vals for k in keywords)
     except Exception:
         return False
-
-def _unique_month_label(dt: pd.Timestamp) -> str:
-    return f"{dt.year}-{dt.month:02d}"
-
 
 def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
     target = None
@@ -491,9 +488,10 @@ def render_finance_table(data: Dict[str, pd.DataFrame]) -> None:
     ingresos = float(k.get("ingresos") or 0); costos = float(k.get("costos") or 0)
     margen = ingresos - costos
     df_tab = pd.DataFrame({"Concepto":["Ingresos","Costos","Margen"], "Monto":[ingresos,costos,margen]})
-    df_tab["Monto"] = df_tab["Monto"].apply(_fmt_pesos)
+    df_tab["Monto"] = df_tab["Monto"].apply(fmt_money)
     st.dataframe(df_tab, use_container_width=True)
 
+# -----------------------------  Buscadores "mejor par" ----------------------
 def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable):
     best = None
     for h, df in data.items():
@@ -501,7 +499,6 @@ def find_best_pair_money(data: Dict[str, pd.DataFrame], category_match: callable
         roles = detect_roles_for_sheet(df, h)
         money_cols = [c for c,r in roles.items() if r=="money"]
         if not money_cols: continue
-        # acepta category o text (alto cardinal)
         cat_cols = [c for c,r in roles.items() if r in ("category","text")]
         matches = [c for c in cat_cols if category_match(_norm(c))]
         for cat in matches:
@@ -553,7 +550,7 @@ def find_best_pair_generic(data: Dict[str, pd.DataFrame], category_match: callab
             return hh, ddf, matches[0], "__count__", "count"
     return None, None, None, None, None
 
-
+# -----------------------------  Bloques de la UI ----------------------------
 def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
     def is_tipo_cliente(colname_norm: str) -> bool:
         return (("cliente" in colname_norm) and (("tipo" in colname_norm) or ("segment" in colname_norm)))
@@ -572,7 +569,6 @@ def render_cliente_y_proceso(data: Dict[str, pd.DataFrame]) -> None:
         with c2: mostrar_grafico_barras_v3(df2, cat2, val2, "Monto por Proceso")
     else:
         with c2: st.info("No encontré dinero + 'Proceso' para graficar.")
-
 
 def _fmt_pct(p):
     try: return f"{float(p)*100:.1f}%"
@@ -641,17 +637,13 @@ def derive_global_insights(data: Dict[str, Any]) -> Dict[str, Any]:
     if margen_pct is not None and margen_pct < margen_target and ingresos>0:
         ventas_nec = costos/(1-margen_target); uplift = max(0.0, ventas_nec/ingresos-1.0)
         opps.append(f"Ajustes de precios: subir {_fmt_pct(uplift)} para margen objetivo {_fmt_pct(margen_target)}.")
-        alerts.append(f"Margen bajo: actual {_fmt_pct(margen_pct)} sobre {_fmt_pesos(ingresos)}.")
+        alerts.append(f"Margen bajo: actual {_fmt_pct(margen_pct)} sobre {fmt_money(ingresos)}.")
     if lt and lt>4.5: opps.append("Reducir lead time 1 día eleva capacidad ~+33%.")
     if conv and conv<75: opps.append("Subir conversión 5–10 pp con playbook de cierre.")
     proj = {"base": ingresos, "optim": ingresos*(1+0.05), "cons": ingresos*0.95}
     return {"kpis":kpis,"by_process":by_process,"process_concentration":conc_share,
             "alerts":alerts,"opportunities":opps,"targets":{"margin_pct":margen_target},
             "projection_6m":proj,"sheet_for_process":sheet_for_process,"by_process_role":"money"}
-
-def _fmt_pesos(v):
-    try: return f"${int(round(float(v))):,}".replace(",", ".")
-    except: return str(v)
 
 def build_verified_summary(facts: dict) -> str:
     val = facts.get("value_col","valor")
@@ -660,9 +652,9 @@ def build_verified_summary(facts: dict) -> str:
     total = facts.get("total",0); rows = facts.get("rows",0)
     encabezado = "### Resumen ejecutivo\n"
     if cat and facts.get("by_category"):
-        lines = [f"- {val.title()} ({op.upper()}): total {_fmt_pesos(total)} por **{cat}** (sobre {rows} filas)."]
+        lines = [f"- {val.title()} ({op.upper()}): total {fmt_money(total)} por **{cat}** (sobre {rows} filas)."]
     else:
-        lines = [f"- {val.title()} ({op.upper()}): {_fmt_pesos(total)} (sobre {rows} filas)."]
+        lines = [f"- {val.title()} ({op.upper()}): {fmt_money(total)} (sobre {rows} filas)."]
     return encabezado + "\n".join(lines)
 
 def compose_actionable_text(ins: Dict[str,Any]) -> str:
@@ -674,12 +666,12 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     proj = ins.get("projection_6m", {})
     tgt = ins.get("targets", {}).get("margin_pct", 0.10)
 
-    def _fmt_byrole(v): return _fmt_pesos(v)
+    def _fmt_byrole(v): return fmt_money(v)
 
     secciones = []
     lines = ["### Diagnóstico basado en datos"]
     if ingresos:
-        lines.append(f"- Ingresos últimos datos: {_fmt_pesos(ingresos)}; costos: {_fmt_pesos(costos)}; margen: {_fmt_pesos(margen)} ({_fmt_pct(margen_pct) if margen_pct is not None else '—'}).")
+        lines.append(f"- Ingresos últimos datos: {fmt_money(ingresos)}; costos: {fmt_money(costos)}; margen: {fmt_money(margen)} ({_fmt_pct(margen_pct) if margen_pct is not None else '—'}).")
     if bp:
         top = bp[0]; share = ins.get("process_concentration")
         lines.append(f"- Proceso líder: **{top['proceso']}** con {_fmt_byrole(top['monto'])}{f' ({_fmt_pct(share)})' if share is not None else ''}.")
@@ -702,9 +694,9 @@ def compose_actionable_text(ins: Dict[str,Any]) -> str:
     if proj:
         base = proj.get("base", ingresos); optim = proj.get("optim", ingresos); cons = proj.get("cons", ingresos)
         secciones.append("### Estimaciones y proyecciones (6 meses)\n"
-                         f"- **Base**: {_fmt_pesos(base)} / mes.\n"
-                         f"- **Optimista**: {_fmt_pesos(optim)} / mes.\n"
-                         f"- **Conservador**: {_fmt_pesos(cons)} / mes.")
+                         f"- **Base**: {fmt_money(base)} / mes.\n"
+                         f"- **Optimista**: {fmt_money(optim)} / mes.\n"
+                         f"- **Conservador**: {fmt_money(cons)} / mes.")
     secciones.append("### Próximos pasos\n- Finanzas: simulación de margen y precios.\n- Operaciones: plan de reducción de lead time.\n- Comercial: campaña de mix.")
     return "\n\n".join(secciones)
 
@@ -718,7 +710,7 @@ def compose_operational_text(data: Dict[str, Any]) -> str:
         roles = detect_roles_for_sheet(df, h)
         estado_col = None
         for c in df.columns:
-            if roles.get(c)=="category" or roles.get(c)=="text":
+            if roles.get(c) in ("category","text"):
                 if any(k in _norm(c) for k in estados_hints):
                     estado_col = c; break
         if not estado_col: continue
@@ -744,48 +736,76 @@ def compose_operational_text(data: Dict[str, Any]) -> str:
     ]
     return "\n".join(bloques)
 
-def compose_focus_text(facts: Dict[str, Any], pregunta: str) -> str:
-    focus = detect_focus_from_question(pregunta)["focus"]
-    val_role = facts.get("value_role", "unknown"); op = facts.get("op", "sum")
-    total = float(facts.get("total") or 0); rows = int(facts.get("rows") or 0)
-    bycat = facts.get("by_category") or []; cat = facts.get("category_col")
-    def _fmt_byrole(v):
-        if val_role == "money": return _fmt_pesos(v)
-        if val_role == "percent":
-            try:
-                fv = float(v); fv = fv*100 if 0<=fv<=1 else fv
-                return f"{fv:.1f}%"
-            except: return str(v)
-        if op == "count" or val_role in ("id","quantity"): return _fmt_number_general(v)
-        return _fmt_number_general(v)
-    top1_val = top3_sum = 0; top1_label = "—"; n_cats = len(bycat)
-    if bycat:
-        top1_label = str(bycat[0]["categoria"]); top1_val = float(bycat[0]["valor"])
-        top3_sum = float(sum(b["valor"] for b in bycat[:3]))
-    share_top1 = (top1_val/total) if total>0 else None; share_top3 = (top3_sum/total) if total>0 else None
-    out = []
-    out.append("### Resumen ejecutivo (complementario)")
-    if cat:
-        out.append(f"- Universo analizado: **{rows}** filas; métrica **{op.upper()} de {facts.get('value_col','valor')}** por **{cat}**.")
-    else:
-        out.append(f"- Universo analizado: **{rows}** filas; métrica **{op.upper()}** total.")
-    if share_top1 is not None:
-        out.append(f"- Concentración: **{top1_label}** lidera con {_fmt_byrole(top1_val)} ({_fmt_pct(share_top1)} del total).")
-    if share_top3 is not None and n_cats >= 3:
-        out.append(f"- Los **Top 3** concentran {_fmt_pct(share_top3)}; la **cola larga** suma {_fmt_pct(1-share_top3)} en {max(0,n_cats-3)} categorías.")
-    if n_cats >= 8 and share_top1 and share_top1 >= 0.60:
-        out.append("- Riesgo: concentración ≥60% en el líder. Diversificar reduce volatilidad.")
-    out.append("\n### Recomendaciones")
-    if share_top1 is not None and share_top1 >= 0.60 and n_cats >= 2:
-        out.append(f"1. Diversificar: mover 5–10 pp desde **{top1_label}** hacia #2/#3.")
-    else:
-        out.append("1. Profundizar en las 2 categorías con mejor margen unitario y crecimiento.")
-    if val_role == "money": out.append("2. Negociar insumos / mermas: meta **-3%** costo promedio.")
-    if op != "count" and total > 0: out.append(f"3. Objetivo 6M: crecer **{_fmt_pct(0.05)}** manteniendo margen.")
-    out.append("\n### Riesgos\n- Sesgos de registro en categorías residuales o mal tipificadas.")
-    return "\n".join(out)
+def compose_market_text(data: Dict[str, Any]) -> str:
+    # Detecta tipo cliente, marca, modelo y estacionalidad
+    def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
+    def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
+    def is_modelo(n): return any(k in n for k in ("modelo","model","version","versión","trim"))
 
+    # Helper to get top list
+    def top_from_pair(pair):
+        if not pair or not pair[0]: return []
+        h, df, cat, val, modo = pair
+        if modo == "sum":
+            s = (df.assign(__v=pd.to_numeric(df[val], errors="coerce"))
+                   .groupby(cat, dropna=False)["__v"].sum().sort_values(ascending=False).head(5))
+            return [(str(k), float(v), "monto") for k,v in s.items()]
+        else:
+            s = df[cat].astype(str).value_counts().head(5)
+            return [(str(k), int(v), "conteo") for k,v in s.items()]
 
+    pc = find_best_pair_generic(data, is_cliente)
+    pm = find_best_pair_generic(data, is_marca)
+    pmo= find_best_pair_generic(data, is_modelo)
+
+    top_cliente = top_from_pair(pc)
+    top_marca   = top_from_pair(pm)
+    top_modelo  = top_from_pair(pmo)
+
+    # Estacionalidad (fecha + monto)
+    estac_txt = "—"
+    for h, df in data.items():
+        if df is None or df.empty: continue
+        roles = detect_roles_for_sheet(df, h)
+        date_cols = [c for c,r in roles.items() if r=="date"]
+        money_cols= [c for c,r in roles.items() if r=="money"]
+        if date_cols and money_cols:
+            dt = pd.to_datetime(df[date_cols[0]], errors="coerce")
+            d2 = (df.assign(__mm = dt.dt.to_period("M").dt.to_timestamp())
+                    .assign(MES=lambda d: d["__mm"].dt.strftime("%Y-%m")))
+            s = (d2.assign(__v=pd.to_numeric(d2[money_cols[0]], errors="coerce"))
+                    .groupby("MES")["__v"].sum().sort_values(ascending=False))
+            if len(s)>0:
+                estac_txt = f"mes pico: {s.index[0]} ({fmt_money(float(s.iloc[0]))})"
+            break
+
+    lines = ["### Insights de mercado",
+             "- Mix de clientes y productos, con focos comerciales accionables.",
+             "\n**Top marcas**:"]
+    if top_marca:
+        lines += [f"- {i+1}. {n}: {fmt_money(v) if t=='monto' else _fmt_number_general(v)}" for i,(n,v,t) in enumerate(top_marca)]
+    else:
+        lines.append("- No se detectaron marcas.")
+
+    lines.append("\n**Top modelos**:")
+    if top_modelo:
+        lines += [f"- {i+1}. {n}: {fmt_money(v) if t=='monto' else _fmt_number_general(v)}" for i,(n,v,t) in enumerate(top_modelo)]
+    else:
+        lines.append("- No se detectaron modelos.")
+
+    lines.append("\n**Estacionalidad:** " + estac_txt)
+
+    lines.append("\n### Recomendaciones de marketing")
+    lines += [
+        "1. Campaña lookalike sobre clientes del segmento líder (email + WhatsApp).",
+        "2. Paquetes por modelo top (precio ancla + upsell de detailing).",
+        "3. Promos anticíclicas 2 semanas antes del mes con menor demanda.",
+        "4. Cross-sell a clientes de 'desarme' hacia 'pintura' con voucher del 5%.",
+        "5. Landing con testimonios para marcas top (SEO local por marca/modelo)."
+    ]
+    return "\n".join(lines)
+
+# -----------------------------  Prompts LLM ---------------------------------
 def make_system_prompt():
     return ("Eres un Controller Financiero senior para un taller de desabolladura y pintura. "
             "Responde SIEMPRE con estilo ejecutivo + analítico y basándote EXCLUSIVAMENTE en la planilla.")
@@ -919,6 +939,7 @@ PREGUNTA:
     try: return json.loads(m.group(0))
     except Exception: return {}
 
+# -----------------------------  Compute & Execute ---------------------------
 def _apply_filters(df: pd.DataFrame, filters: List[Dict[str,str]]) -> pd.DataFrame:
     if not filters: return df
     out = df.copy()
@@ -1056,7 +1077,7 @@ def execute_compute(plan_c: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, A
             continue
     return {"ok": False, "msg": last_err or "No se pudo calcular."}
 
-
+# -----------------------------  Interfaz ------------------------------------
 st.title("🤖 Controller Financiero IA")
 
 with st.sidebar:
@@ -1075,13 +1096,12 @@ with st.sidebar:
     with st.expander("🔧 Diagnóstico del código"):
         st.caption(f"Build: **{APP_BUILD}**")
         try:
-            with open(__file__, "r", encoding="utf-8") as f: src = f.read()
             h = hashlib.sha256(render_finance_table.__code__.co_code).hexdigest()[:16]
             st.caption(f"Hash finanzas: `{h}`")
         except Exception as e:
-            st.caption(f"No pude inspeccionar archivo: {e}")
+            st.caption(f"No pude inspeccionar funciones: {e}")
 
-
+# -----------------------------  Vistas --------------------------------------
 if ss.menu_sel == "Datos":
     st.markdown("### 📁 Datos")
     fuente = st.radio("Fuente", ["Excel","Google Sheets"], key="k_fuente")
@@ -1089,9 +1109,6 @@ if ss.menu_sel == "Datos":
         file = st.file_uploader("Sube un Excel", type=["xlsx","xls"])
         if file:
             ss.data = load_excel(file)
-            # aplica diccionario si viene
-            if "DICCIONARIO" in ss.data:
-                pass
             st.success("Excel cargado.")
     else:
         with st.form(key="form_gsheet"):
@@ -1101,8 +1118,6 @@ if ss.menu_sel == "Datos":
             try:
                 ss.data = load_gsheet(st.secrets["GOOGLE_CREDENTIALS"], url)
                 ss.sheet_url = url
-                if "DICCIONARIO" in ss.data:
-                    pass
                 st.success("Google Sheet conectado.")
             except Exception as e:
                 st.error(f"Error conectando Google Sheet: {e}")
@@ -1133,7 +1148,7 @@ elif ss.menu_sel == "KPIs":
         c5, c6, c7 = st.columns(3)
         c5.metric("Servicios",    f"{kpis.get('servicios',0)}")
         tp = kpis.get("ticket_promedio")
-        c6.metric("Ticket promedio", f"${int(round(tp)):,}".replace(",", ".") if tp else "—")
+        c6.metric("Ticket promedio", f"{fmt_money(tp) if tp else '—'}")
         conv = kpis.get("conversion_pct")
         c7.metric("Conversión",   f"{conv:.1f}%" if conv is not None else "—")
         lt = kpis.get("lead_time_mediano_dias")
@@ -1145,9 +1160,11 @@ elif ss.menu_sel == "Consulta IA":
         st.info("Carga datos en **Datos**.")
     else:
         st.markdown("### 🤖 Consulta")
-        pregunta = st.text_area("Pregunta")
-        cBtns = st.columns(4)
+
+        # Botonera arriba (5 botones)
+        cBtns = st.columns(5)
         left, right = st.columns([0.58, 0.42])
+        pregunta = st.text_input("Pregunta", label_visibility="collapsed", placeholder="Escribe tu pregunta...")
 
         if cBtns[0].button("📊 Análisis General Automático"):
             analisis = analizar_datos_taller(data, "")
@@ -1179,7 +1196,7 @@ elif ss.menu_sel == "Consulta IA":
 
         if cBtns[3].button("🔍 Insights de mercado"):
             with left:
-                render_ia_html_block("### Insights de mercado\n- Mix de clientes, **Top marcas y modelos**, y **estacionalidad**.\n- Úsalo para campañas y pricing segmentado.", height=220)
+                render_ia_html_block(compose_market_text(data), height=520)
             with right:
                 def is_cliente(n): return ("cliente" in n) and (("tipo" in n) or ("segment" in n))
                 def is_marca(n):  return any(k in n for k in ("marca","brand","make","fabricante"))
@@ -1188,11 +1205,11 @@ elif ss.menu_sel == "Consulta IA":
                 c_top = st.columns(2)
 
                 # Tipo cliente
-                hC, dfC, catC, valC, modoC = find_best_pair_generic(data, is_cliente)
+                hC, dfC, catC, valC = find_best_pair_money(data, is_cliente)
                 if hC:
-                    mostrar_grafico_torta(dfC, catC, (valC if modoC=="sum" else "__count__"), "Tipo de Cliente")
+                    mostrar_grafico_torta(dfC, catC, valC, "Tipo de Cliente")
 
-                # Marcas (columna izq)
+                # Marcas
                 hM, dfM, catM, valM, modoM = find_best_pair_generic(data, is_marca)
                 with c_top[0]:
                     if hM:
@@ -1203,7 +1220,7 @@ elif ss.menu_sel == "Consulta IA":
                     else:
                         st.info("Sin columna de **marca**.")
 
-                # Modelos (columna der)
+                # Modelos
                 hMo, dfMo, catMo, valMo, modoMo = find_best_pair_generic(data, is_modelo)
                 with c_top[1]:
                     if hMo:
@@ -1231,7 +1248,8 @@ elif ss.menu_sel == "Consulta IA":
                 if not found:
                     st.info("No encontré (fecha + monto) para estacionalidad.")
 
-        if st.button("Responder") and pregunta:
+        # Botón Responder (ahora arriba, 5to botón)
+        if cBtns[4].button("Responder") and pregunta:
             schema = _build_schema(data)
             plan_c = plan_compute_from_llm(pregunta, schema)
             facts = execute_compute(plan_c, data)
@@ -1269,7 +1287,7 @@ elif ss.menu_sel == "Consulta IA":
                             st.dataframe(df_res, use_container_width=True)
                     else:
                         role = facts.get("value_role","unknown")
-                        valtxt = (_fmt_pesos(facts['total']) if role=="money"
+                        valtxt = (fmt_money(facts['total']) if role=="money"
                                   else (_fmt_number_general(facts['total']) if facts['op']=="count" or role in ("id","quantity")
                                         else _fmt_number_general(facts['total'])))
                         st.metric(f"{facts['op'].upper()} de {facts['value_col']}", valtxt)
